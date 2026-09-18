@@ -524,7 +524,8 @@ function applyTheme(mode) {
   else root.removeAttribute('data-theme');
   document.querySelectorAll('#themeGroup button').forEach(b => b.classList.toggle('active', b.dataset.theme === mode));
 }
-let currentThemeMode = localStorage.getItem('cqa-theme') || 'system';
+let currentThemeMode = new URLSearchParams(location.search).get('theme')
+  || localStorage.getItem('cqa-theme') || 'system';
 applyTheme(currentThemeMode);
 els.themeGroup.addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-theme]');
@@ -1086,11 +1087,29 @@ function handleEvent(payload, liveStatus, traceBody, bubble, citationsRow) {
 }
 
 // ======================= init =======================
+// Deep-link support: ?thread=<id> restores a conversation, &source=<path>:<start>-<end>
+// also opens the source panel — handy for screenshots/demos, not required for normal use.
 (async () => {
   await checkHealth();
   await loadModels();
   loadModules();
-  loadThreads();
+  await loadThreads();
+  const params = new URLSearchParams(location.search);
+  const t = params.get('thread');
+  if (t) await switchThread(t);
+  const src = params.get('source');
+  if (src) {
+    const m = src.match(/^([\w./-]+):(\d+)-(\d+)$/);
+    if (m) {
+      // Deep-linked open (e.g. for a screenshot) — skip the slide-in transition,
+      // a fresh page load has no prior state worth animating from.
+      els.sourcePanel.classList.add('resizing');
+      await openSource(m[1], parseInt(m[2], 10), parseInt(m[3], 10));
+      requestAnimationFrame(() => els.sourcePanel.classList.remove('resizing'));
+    }
+  }
+  if (params.get('settings')) togglePopover(true);
+  if (t || src) await new Promise((r) => setTimeout(r, 400)); // let paint settle for screenshots
 })();
 </script>
 </body>

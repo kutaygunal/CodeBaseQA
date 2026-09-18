@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
@@ -45,8 +45,15 @@ def get_agent() -> Agent:
 
 
 @app.get("/")
-def index():
-    return FileResponse(str(STATIC_DIR / "index.html"))
+def index(theme: str | None = Query(None)):
+    """Serve the SPA shell. An optional ?theme=light|dark is baked into the initial
+    <html> tag server-side — avoids a flash-of-wrong-theme on first paint, and (as a
+    side effect) makes headless screenshots deterministic without waiting on client JS."""
+    if theme not in ("light", "dark"):
+        return FileResponse(str(STATIC_DIR / "index.html"))
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace('<html lang="en">', f'<html lang="en" data-theme="{theme}">', 1)
+    return HTMLResponse(html)
 
 
 @app.get("/api/health")

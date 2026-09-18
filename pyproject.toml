@@ -27,6 +27,11 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+# Only needed to regenerate docs/screenshots/*.png (uses the system-installed Edge/Chrome
+# via `channel="msedge"` — no extra browser download). Not required to run the app.
+screenshots = [
+  "playwright>=1.45.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
