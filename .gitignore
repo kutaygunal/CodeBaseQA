@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Lang-chain artifacts / ingested index
+index/
+.chroma/
+chroma/
+*.sqlite3
+/.index/
+demo_output.json
+/.claude/
+
+# Build & generated
+build/
+dist/
+node_modules/
+.cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

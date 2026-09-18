@@ -1,0 +1,49 @@
+# CodebaseQA target configuration — see PLAN.md
+
+repo:
+  # Path to the target repo, relative to the project root.
+  root: "../LuxTrace"
+  # Directories under root to index.
+  include_dirs:
+    - "src"
+    - "test"
+  # Directories to never descend into.
+  ignore_dirs:
+    - "build"
+    - ".git"
+    - "resources"
+    - "docs"
+  # Extensions treated as C++ source for AST chunking.
+  cpp_extensions: [".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx", ".cu", ".cuh"]
+  # Extensions indexed as plain-text chunks (no AST), e.g. build config.
+  text_extensions: [".cmake", ".txt", ".in", ".inc"]
+
+chunking:
+  # Target chunk size, in tokens (approximated as whitespace-ish words * 1.3).
+  target_tokens: 800
+  max_tokens: 1200
+  min_tokens: 200
+  overlap_ratio: 0.15
+
+models:
+  # Chat/agent model — see PLAN.md §5.1. Cloud-routed, needs Ollama sign-in + network.
+  chat_model: "deepseek-v4.1-flash:cloud"
+  # Fully local fallback if the cloud model / network is unavailable.
+  chat_model_fallback: "qwen3-vl:8b"
+  # Embeddings — always local.
+  embed_model: "nomic-embed-text"
+
+retrieval:
+  top_k: 8
+  rrf_k: 60
+  # Hard gate thresholds — see PLAN.md §3.1
+  min_hits: 3
+  rrf_min_score: 0.03
+
+graph:
+  max_tool_rounds: 3
+
+storage:
+  chroma_dir: ".chroma"
+  index_state_file: ".index/state.json"
+  collection_name: "luxtrace"

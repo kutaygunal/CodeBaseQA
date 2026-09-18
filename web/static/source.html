@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Source — CodebaseQA</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
+<script src="/static/source-viewer.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0b0d12; --bg-elev: #12151c; --border: #262b36; --text: #e7e9ee;
+    --text-faint: #656e80; --accent: #6ea8fe; --accent-glow: rgba(110,168,254,.15);
+    --code-bg: #0d1117; --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8; --bg-elev: #fff; --border: #e1e3e8; --text: #1a1d24;
+      --text-faint: #8890a0; --accent: #2f6fe0; --accent-glow: rgba(47,111,224,.1); --code-bg: #f4f5f7;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  header {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border);
+    background: var(--bg-elev); position: sticky; top: 0;
+  }
+  header .path { font-family: var(--font-mono); font-size: 13px; }
+  header .lines { color: var(--text-faint); font-size: 12px; }
+  .source-body { font-family: var(--font-mono); font-size: 12.5px; background: var(--code-bg); }
+  .src-line { display: flex; }
+  .src-line .ln {
+    width: 56px; flex-shrink: 0; text-align: right; padding: 0 12px 0 0; color: var(--text-faint);
+    user-select: none; border-right: 1px solid var(--border); background: var(--bg-elev);
+  }
+  .src-line .code { padding: 0 14px; white-space: pre; flex: 1; }
+  .src-line.hl { background: var(--accent-glow); }
+  .src-line.hl .ln { color: var(--accent); font-weight: 600; }
+  .loading, .error { padding: 20px; color: var(--text-faint); }
+  .hljs-comment, .hljs-quote { color: var(--text-faint); font-style: italic; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-literal { color: #c58af9; }
+  .hljs-string, .hljs-doctag { color: #85d18a; }
+  .hljs-number { color: #e0a458; }
+  .hljs-title, .hljs-title.function_, .hljs-title.class_ { color: #6ea8fe; }
+  .hljs-type, .hljs-built_in { color: #58c4dc; }
+  .hljs-meta, .hljs-meta .hljs-keyword { color: #e0a458; }
+</style>
+</head>
+<body>
+<header>
+  <span class="path" id="path">—</span>
+  <span class="lines" id="lines"></span>
+</header>
+<div class="source-body" id="body"><div class="loading">Loading…</div></div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const path = params.get('path');
+  const start = parseInt(params.get('start') || '0', 10) || null;
+  const end = parseInt(params.get('end') || '0', 10) || null;
+  document.getElementById('path').textContent = path || '(no file specified)';
+  document.getElementById('lines').textContent = (start && end) ? `L${start}-${end}` : '';
+  document.title = (path || 'Source') + ' — CodebaseQA';
+  if (path) svLoadAndRenderSource(document.getElementById('body'), path, start, end);
+</script>
+</body>
+</html>
