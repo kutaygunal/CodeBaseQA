@@ -103,6 +103,10 @@ class TurnStore:
                 );
                 """
             )
+            # Backward-compatible migration: add the `suggestions` column if missing.
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(turns)").fetchall()}
+            if "suggestions" not in cols:
+                self._conn.execute("ALTER TABLE turns ADD COLUMN suggestions TEXT")
 
     # --- turns -----------------------------------------------------------
 
@@ -119,6 +123,7 @@ class TurnStore:
         module: str | None,
         mode: str,
         latency_ms: int,
+        suggestions: list[str] | None = None,
     ) -> dict:
         m = summarize_trace(trace)
         cost = estimate_cost(self.pricing, provider, model, m["tokens_in"], m["tokens_out"])
@@ -134,15 +139,20 @@ class TurnStore:
                     m["llm_calls"], m["tool_rounds"], cost, time.time(),
                 ),
             )
+            if suggestions:
+                self._conn.execute(
+                    "UPDATE turns SET suggestions=? WHERE id=?", (json.dumps(suggestions), turn_id)
+                )
         return {"turn_id": turn_id, "latency_ms": latency_ms, "cost_usd": cost, **m}
 
     @staticmethod
     def _row_to_turn(r: sqlite3.Row | tuple) -> dict:
-        (tid, thread_id, question, answer, citations, trace, provider, model, module, mode,
+        (tid, thread_id, question, answer, citations, trace, suggestions, provider, model, module, mode,
          latency_ms, tin, tout, calls, rounds, cost, created_at, rating, reason, comment, paths) = r
         return {
             "turn_id": tid, "thread_id": thread_id, "question": question, "answer": answer,
             "citations": json.loads(citations), "trace": json.loads(trace),
+            "suggestions": json.loads(suggestions) if suggestions else [],
             "provider": provider, "model": model, "module": module, "mode": mode,
             "metrics": {
                 "latency_ms": latency_ms, "tokens_in": tin, "tokens_out": tout,
@@ -155,7 +165,7 @@ class TurnStore:
             },
         }
 
-    _SELECT = """SELECT t.id, t.thread_id, t.question, t.answer, t.citations, t.trace, t.provider, t.model,
+    _SELECT = """SELECT t.id, t.thread_id, t.question, t.answer, t.citations, t.trace, t.suggestions, t.provider, t.model,
                  t.module, t.mode, t.latency_ms, t.tokens_in, t.tokens_out, t.llm_calls, t.tool_rounds,
                  t.cost_usd, t.created_at, f.rating, f.reason, f.comment, f.correct_paths
                  FROM turns t LEFT JOIN feedback f ON f.turn_id = t.id"""

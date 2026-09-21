@@ -17,6 +17,7 @@ from .graph import CITATION_RE, build_graph
 from .onboard import TOUR_SYSTEM_PROMPT, TourPrep, index_key, prepare_tour
 from .retriever import Retriever
 from .review import REVIEW_SYSTEM_PROMPT, ReviewPrep, prepare_review
+from .suggest import suggest_followups
 from .symbol_index import SymbolIndex
 from .threads import ThreadStore
 from .turns import TurnStore
@@ -69,11 +70,14 @@ class Agent:
         trace: list[dict], t0: float,
     ) -> dict:
         self.threads.touch(thread_id, first_question=question)
+        sugg = suggest_followups(question, trace)
         meta = self.turns.record(
             thread_id=thread_id, question=question, answer=answer, citations=citations, trace=trace,
             provider=state_in["provider"], model=state_in["model"], module=state_in["module"],
             mode=state_in["mode"], latency_ms=int((time.perf_counter() - t0) * 1000),
+            suggestions=sugg,
         )
+        meta["suggestions"] = sugg
         return meta
 
     def delete_thread(self, thread_id: str) -> None:
@@ -108,7 +112,8 @@ class Agent:
             "citations": citations,
             "trace": trace,
             "turn_id": meta["turn_id"],
-            "metrics": {k: v for k, v in meta.items() if k != "turn_id"},
+            "suggestions": meta.get("suggestions") or [],
+            "metrics": {k: v for k, v in meta.items() if k not in ("turn_id", "suggestions")},
         }
 
     def stream(
@@ -180,6 +185,10 @@ class Agent:
                             "forced": partial.get("forced_tool_this_round", False),
                             "tool_calls": [(tc.get("function") or {}).get("name") for tc in tool_calls],
                             "content_preview": (last_msg.get("content") or "")[:200],
+                            # Full text the model wrote before deciding to call a tool. The
+                            # UI persists it in the answer as a labelled "Thinking…" block
+                            # (rather than only showing it transiently / in the trace).
+                            "thinking": last_msg.get("content") if tool_calls else None,
                         }
                     elif node_name == "tools":
                         entry = _first(partial.get("trace"))
@@ -198,7 +207,8 @@ class Agent:
                             "citations": citations,
                             "trace": trace,
                             "turn_id": meta["turn_id"],
-                            "metrics": {k: v for k, v in meta.items() if k != "turn_id"},
+                            "suggestions": meta.get("suggestions") or [],
+                            "metrics": {k: v for k, v in meta.items() if k not in ("turn_id", "suggestions")},
                         }
         except Exception as e:  # noqa: BLE001
             yield {"type": "error", "message": str(e)}
@@ -263,7 +273,8 @@ class Agent:
             yield {
                 "type": "final", "thread_id": thread_id, "answer": cached["markdown"],
                 "citations": cached["citations"], "trace": trace, "turn_id": meta["turn_id"],
-                "metrics": {k: v for k, v in meta.items() if k != "turn_id"}, "cached": True,
+                "suggestions": meta.get("suggestions") or [],
+                "metrics": {k: v for k, v in meta.items() if k not in ("turn_id", "suggestions")}, "cached": True,
             }
             return
         for ev in self.stream(prep.title, thread_id=thread_id, provider=provider, model=model, extra=extra):
@@ -291,6 +302,7 @@ class Agent:
                         "turn_id": t["turn_id"],
                         "metrics": t["metrics"],
                         "feedback": t["feedback"],
+                        "suggestions": t.get("suggestions") or [],
                     }
                 )
             return out
