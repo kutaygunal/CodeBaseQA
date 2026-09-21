@@ -30,8 +30,11 @@ models:
   chat_model: "deepseek-v4.1-flash:cloud"
   # Fully local fallback if the cloud model / network is unavailable.
   chat_model_fallback: "qwen3-vl:8b"
-  # Embeddings — always local.
-  embed_model: "nomic-embed-text"
+  # Embeddings — always local. Qwen3-Embedding-4B (2560-dim, Q4_K_M) is the
+  # indexer; pulls faster/better than nomic-embed-text (768-dim). Embedding dim
+  # changed, so the persistent Chroma index MUST be rebuilt after switching
+  # (see scripts/index_luxtrace.py).
+  embed_model: "qwen3-embedding:4b"
 
 retrieval:
   top_k: 8
@@ -39,6 +42,53 @@ retrieval:
   # Hard gate thresholds — see PLAN.md §3.1
   min_hits: 3
   rrf_min_score: 0.03
+  # First-stage candidate pool handed to the reranker.
+  candidate_k: 20
+  # Task instruction prepended to each *query* before dense embedding (documents stay
+  # unprefixed). Only meaningful for the instruction-aware Qwen3-Embedding; measured on the
+  # 25-case bench vs uniform (no) instruction: MRR .777->.782, recall@3 .84->.88. Empty
+  # string disables it (plain nomic-style matching). See scripts/retrieval_bench.py --qi.
+  embed_query_instruction: "Retrieve the relevant implementation or code that answers the query."
+  # Cross-encoder reranking (fastembed/ONNX, local; ~0.15 GB model downloaded on first use).
+  # scripts/retrieval_bench.py (25 cases, LuxTrace):
+  #   plain index:       MRR .51 -> .63 fused (.69 pure, but pure can evict a good chunk: recall@8 .92 -> .88)
+  #   contextual index:  MRR .82 -> .72 — the index already ranks well, so rerank costs ~1s and
+  #                      gains one case at recall@8. Hence off by default; enable it if you index
+  #                      WITHOUT ingest.contextual.
+  rerank:
+    enabled: false
+    model: "jinaai/jina-reranker-v1-turbo-en"
+    fuse_weight: 1.0
+  # One small LLM call per question: standalone rewrite of follow-ups, alternative search
+  # queries, a HyDE passage, and (compound questions) a sub-question plan. Bench: recall@8 .92 -> 1.00.
+  analyze:
+    enabled: true
+    max_queries: 3
+    max_sub_questions: 3
+    min_words: 6
+    use_hyde: true
+  # Call-graph neighbor chunks appended after the ranked hits. Off by default: the 25-case
+  # bench has no case that needs it, so no gain is demonstrated (it adds ~3k tokens/question).
+  expand:
+    enabled: false
+    seeds: 3
+    max_extra: 4
+
+# Index-time options (rebuild with scripts/index_luxtrace.py).
+ingest:
+  contextual:
+    # One LLM call per chunk on first build (cached in .index/context_cache.json, so
+    # rebuilds of unchanged chunks are free). Bench: MRR .51 -> .82, recall@1 .32 -> .76.
+    enabled: true
+    model: null # null -> models.chat_model
+    concurrency: 6
+
+# Review mode (git diff Q&A) — see cqa/review.py.
+review:
+  max_diff_chars: 60000
+  max_tool_rounds: 5
+  default_base: "HEAD~1"
+  default_head: "HEAD"
 
 graph:
   max_tool_rounds: 3

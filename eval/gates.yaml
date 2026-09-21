@@ -1,0 +1,11 @@
+# CI gate thresholds for scripts/eval_answers.py --gate
+# Retrieval recall@3 is measured over CONTENT cases only (negatives have no expected file).
+# refusal_precision is kept below 1.0 because the model answers are non-deterministic run
+# to run — a genuinely out-of-scope case occasionally drifts. Raise it once refusals are
+# stabilized (e.g. with a stronger prompt or an LLM-judge).
+gates:
+  pass_rate: 0.70            # overall answer pass rate (grounded for content, refusal for negatives)
+  recall@3: 0.85             # retrieval recall@3 over expect, content cases only
+  refusal_precision: 0.75    # negative cases must mostly refuse (not hallucinate)
+  citation_validity: 0.85    # fraction of emitted citations that point at a real indexed file
+  budget_violations_max: 2   # allow a few slow outliers before failing

@@ -3,16 +3,19 @@ Anthropic, and any OpenAI-compatible endpoint (e.g. GitHub Models), behind one
 normalized interface so cqa/graph.py doesn't care who's answering.
 
 Normalized response shape: {"content": str, "tool_calls": [{"id": str,
-"function": {"name": str, "arguments": dict}}]}. Internal message history
-stays in that same OpenAI-ish shape everywhere; each provider converts to/from
-its own wire format at the edges.
+"function": {"name": str, "arguments": dict}}], "usage": {"in": int, "out": int}}.
+Internal message history stays in that same OpenAI-ish shape everywhere; each
+provider converts to/from its own wire format at the edges.
+
+Every provider has a blocking `chat()` and a streaming `chat_stream()` that yields
+text deltas followed by one final ChatResult.
 """
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Callable, Iterator, Protocol
 
 import ollama
 
@@ -21,29 +24,95 @@ import ollama
 class ChatResult:
     content: str
     tool_calls: list[dict] = field(default_factory=list)
+    # Token accounting for observability: {"in": prompt_tokens, "out": completion_tokens}.
+    usage: dict = field(default_factory=dict)
 
 
 class ChatProvider(Protocol):
     def chat(self, model: str, messages: list[dict], tools: list[dict]) -> ChatResult: ...
 
+    def chat_stream(
+        self, model: str, messages: list[dict], tools: list[dict]
+    ) -> Iterator["str | ChatResult"]:
+        """Yield text deltas (str) as they arrive, then one final ChatResult."""
+        ...
+
+
+def _norm_tool_args(args) -> dict:
+    if isinstance(args, str):
+        try:
+            return json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {}
+    return args or {}
+
+
+def chat_with_optional_stream(
+    provider: ChatProvider,
+    model: str,
+    messages: list[dict],
+    tools: list[dict],
+    on_token: Callable[[str], None] | None = None,
+) -> ChatResult:
+    """Run one chat call. With `on_token`, stream text deltas through it as they arrive
+    (falling back to the plain non-streaming call for providers that can't stream)."""
+    if on_token is None or not hasattr(provider, "chat_stream"):
+        return provider.chat(model, messages, tools)
+    final: ChatResult | None = None
+    for item in provider.chat_stream(model, messages, tools):
+        if isinstance(item, ChatResult):
+            final = item
+        elif item:
+            on_token(item)
+    return final or ChatResult(content="")
+
 
 class OllamaProvider:
     id = "ollama"
 
+    @staticmethod
+    def _usage(resp) -> dict:
+        get = resp.get if hasattr(resp, "get") else (lambda k, d=None: getattr(resp, k, d))
+        return {"in": int(get("prompt_eval_count", 0) or 0), "out": int(get("eval_count", 0) or 0)}
+
+    @staticmethod
+    def _tool_calls(msg) -> list[dict]:
+        out = []
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            out.append(
+                {
+                    "id": tc.get("id") or f"call_{len(out)}",
+                    "function": {"name": fn.get("name"), "arguments": _norm_tool_args(fn.get("arguments"))},
+                }
+            )
+        return out
+
     def chat(self, model: str, messages: list[dict], tools: list[dict]) -> ChatResult:
         resp = ollama.chat(model=model, messages=messages, tools=tools, think=False, stream=False)
         msg = resp["message"]
-        tool_calls = []
-        for tc in msg.get("tool_calls") or []:
-            fn = tc.get("function") or {}
-            args = fn.get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
-            tool_calls.append({"id": tc.get("id") or f"call_{len(tool_calls)}", "function": {"name": fn.get("name"), "arguments": args}})
-        return ChatResult(content=msg.get("content") or "", tool_calls=tool_calls)
+        return ChatResult(
+            content=msg.get("content") or "", tool_calls=self._tool_calls(msg), usage=self._usage(resp)
+        )
+
+    def chat_stream(
+        self, model: str, messages: list[dict], tools: list[dict]
+    ) -> Iterator["str | ChatResult"]:
+        content_parts: list[str] = []
+        tool_calls: list[dict] = []
+        usage: dict = {}
+        for chunk in ollama.chat(model=model, messages=messages, tools=tools, think=False, stream=True):
+            msg = chunk["message"]
+            delta = msg.get("content") or ""
+            if delta:
+                content_parts.append(delta)
+                yield delta
+            for tc in self._tool_calls(msg):
+                tc["id"] = f"call_{len(tool_calls)}"
+                tool_calls.append(tc)
+            if chunk.get("done"):
+                usage = self._usage(chunk)
+        yield ChatResult(content="".join(content_parts), tool_calls=tool_calls, usage=usage)
 
     @staticmethod
     def list_models() -> list[str]:
@@ -71,14 +140,61 @@ class OpenAIProvider:
             model=model, messages=oi_messages, tools=oi_tools, tool_choice="auto" if oi_tools else None
         )
         msg = resp.choices[0].message
-        tool_calls = []
-        for tc in msg.tool_calls or []:
-            try:
-                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            except json.JSONDecodeError:
-                args = {}
-            tool_calls.append({"id": tc.id, "function": {"name": tc.function.name, "arguments": args}})
-        return ChatResult(content=msg.content or "", tool_calls=tool_calls)
+        tool_calls = [
+            {
+                "id": tc.id,
+                "function": {"name": tc.function.name, "arguments": _norm_tool_args(tc.function.arguments)},
+            }
+            for tc in (msg.tool_calls or [])
+        ]
+        u = getattr(resp, "usage", None)
+        usage = (
+            {"in": getattr(u, "prompt_tokens", 0) or 0, "out": getattr(u, "completion_tokens", 0) or 0}
+            if u
+            else {}
+        )
+        return ChatResult(content=msg.content or "", tool_calls=tool_calls, usage=usage)
+
+    def chat_stream(
+        self, model: str, messages: list[dict], tools: list[dict]
+    ) -> Iterator["str | ChatResult"]:
+        kwargs: dict = dict(model=model, messages=_to_openai_messages(messages), stream=True)
+        if tools:
+            kwargs.update(tools=tools, tool_choice="auto")
+        try:
+            stream = self._client.chat.completions.create(**kwargs, stream_options={"include_usage": True})
+        except Exception:
+            # Some OpenAI-compatible endpoints (e.g. GitHub Models) reject stream_options.
+            stream = self._client.chat.completions.create(**kwargs)
+        content_parts: list[str] = []
+        acc: dict[int, dict] = {}  # tool-call index -> {id, name, args-string}
+        usage: dict = {}
+        for chunk in stream:
+            u = getattr(chunk, "usage", None)
+            if u:
+                usage = {
+                    "in": getattr(u, "prompt_tokens", 0) or 0,
+                    "out": getattr(u, "completion_tokens", 0) or 0,
+                }
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:
+                content_parts.append(delta.content)
+                yield delta.content
+            for tc in delta.tool_calls or []:
+                slot = acc.setdefault(tc.index, {"id": None, "name": "", "args": ""})
+                if tc.id:
+                    slot["id"] = tc.id
+                if tc.function and tc.function.name:
+                    slot["name"] += tc.function.name
+                if tc.function and tc.function.arguments:
+                    slot["args"] += tc.function.arguments
+        tool_calls = [
+            {"id": v["id"] or f"call_{i}", "function": {"name": v["name"], "arguments": _norm_tool_args(v["args"])}}
+            for i, v in sorted(acc.items())
+        ]
+        yield ChatResult(content="".join(content_parts), tool_calls=tool_calls, usage=usage)
 
 
 class AnthropicProvider:
@@ -96,19 +212,20 @@ class AnthropicProvider:
         else:
             self._client = Anthropic(api_key=api_key)
 
-    def chat(self, model: str, messages: list[dict], tools: list[dict]) -> ChatResult:
+    @staticmethod
+    def _request(model: str, messages: list[dict], tools: list[dict]) -> dict:
         system_text, anthro_messages = _to_anthropic_messages(messages)
         anthro_tools = [
             {"name": t["function"]["name"], "description": t["function"]["description"], "input_schema": t["function"]["parameters"]}
             for t in (tools or [])
         ]
-        resp = self._client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=system_text or "",
-            messages=anthro_messages,
-            tools=anthro_tools or None,
-        )
+        kwargs: dict = dict(model=model, max_tokens=4096, system=system_text or "", messages=anthro_messages)
+        if anthro_tools:
+            kwargs["tools"] = anthro_tools
+        return kwargs
+
+    @staticmethod
+    def _parse(resp) -> ChatResult:
         content = ""
         tool_calls = []
         for block in resp.content:
@@ -116,7 +233,26 @@ class AnthropicProvider:
                 content += block.text
             elif block.type == "tool_use":
                 tool_calls.append({"id": block.id, "function": {"name": block.name, "arguments": block.input}})
-        return ChatResult(content=content, tool_calls=tool_calls)
+        u = getattr(resp, "usage", None)
+        usage = (
+            {"in": getattr(u, "input_tokens", 0) or 0, "out": getattr(u, "output_tokens", 0) or 0}
+            if u
+            else {}
+        )
+        return ChatResult(content=content, tool_calls=tool_calls, usage=usage)
+
+    def chat(self, model: str, messages: list[dict], tools: list[dict]) -> ChatResult:
+        return self._parse(self._client.messages.create(**self._request(model, messages, tools)))
+
+    def chat_stream(
+        self, model: str, messages: list[dict], tools: list[dict]
+    ) -> Iterator["str | ChatResult"]:
+        with self._client.messages.stream(**self._request(model, messages, tools)) as stream:
+            for text in stream.text_stream:
+                if text:
+                    yield text
+            final = stream.get_final_message()
+        yield self._parse(final)
 
 
 def _to_openai_messages(messages: list[dict]) -> list[dict]:

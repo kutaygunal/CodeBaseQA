@@ -152,7 +152,7 @@ CodebaseQA/
 
 | Layer | Choice | Why |
 |---|---|---|
-| Embeddings | Ollama `nomic-embed-text` — installed ✅ | cheap, CPU-friendly, no key |
+| Embeddings | Ollama `qwen3-embedding:4b` — installed ✅ | local, 2560-dim, instruction-aware |
 | Chat/agent model | Ollama **`deepseek-v4.1-flash:cloud`** — installed ✅ | 1M context, native tool calling, no local VRAM cost |
 | Offline fallback | Ollama `qwen3-vl:8b` — installed ✅ | keeps the project runnable with no network |
 | Vector store | **Chroma** | small, local, easy |
@@ -168,7 +168,7 @@ Verified directly against the local Ollama daemon:
   capabilities `completion / thinking / tools / vision`.
 - A live `/api/chat` call with a bound `grep_symbol` tool came back with a proper
   `tool_calls` message — **tool calling works**, which the entire TOOLS node depends on.
-- `/api/embed` with `nomic-embed-text` returns vectors.
+- `/api/embed` with `qwen3-embedding:4b` returns 2560-dim vectors.
 
 The 1M context is the decisive win: a whole 3,000-line file can be handed to the REASON
 node after a `read_file` tool call, with no windowing gymnastics.
@@ -259,7 +259,7 @@ resolves to a definition under `src/core/`, and a hybrid query for
 ## 9. Notes / decisions log
 
 - Chat is Ollama **`deepseek-v4.1-flash:cloud`** (tool calling verified against the live
-  daemon); embeddings are local `nomic-embed-text`. No API keys, but chat needs an Ollama
+  daemon); embeddings are local `qwen3-embedding:4b`. No API keys, but chat needs an Ollama
   sign-in + network. `qwen3-vl:8b` is the configured offline fallback. (§5.1)
 - C++ parsing is **tree-sitter-cpp**, not libclang. (§5.2)
 - `src/gpu/GpuTrace.cu` and `.h.in` templates included; build output ignored.

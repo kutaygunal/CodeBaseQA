@@ -7,6 +7,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/cpp.min.js"></script>
 <script src="/static/source-viewer.js"></script>
+<script src="/static/render.js"></script>
+<link rel="stylesheet" href="/static/extras.css">
 <style>
   :root {
     color-scheme: light dark;
@@ -395,6 +397,7 @@
   <div class="spacer"></div>
   <div class="module-chips" id="moduleChips"></div>
   <button class="status-pill" id="statusPill" title="Settings"><span class="status-dot"></span><span>⚙️ Settings</span></button>
+  <div class="icon-btn" id="statsBtn" title="Usage stats: latency, tokens, cost, feedback">📊</div>
   <div class="icon-btn" id="themeBtn" title="Theme">🌓</div>
 </header>
 
@@ -431,6 +434,9 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <button class="new-chat-btn" id="newChatBtn">+ New chat</button>
+      <div class="sidebar-actions">
+        <button id="reviewBtn" title="Review a git range or pasted diff">🔍 Review changes</button>
+      </div>
     </div>
     <div class="thread-list" id="threadList"><div class="sidebar-empty">No conversations yet.</div></div>
   </aside>
@@ -472,11 +478,53 @@
     <div class="source-header">
       <span class="path" id="sourcePath">—</span>
       <span class="lines" id="sourceLines"></span>
+      <button class="explain-btn" id="explainFileBtn" title="Generate an onboarding tour of this file">📖 Explain</button>
       <button class="icon-btn" id="undockSourceBtn" title="Open in a new window">⧉</button>
       <button class="icon-btn" id="closeSourceBtn" title="Close">✕</button>
     </div>
     <div class="source-body" id="sourceBody"></div>
   </aside>
+</div>
+
+<!-- Stats modal (#18) -->
+<div class="modal-backdrop" id="statsModal">
+  <div class="modal">
+    <button class="icon-btn modal-close" id="statsClose" title="Close">✕</button>
+    <h2>Usage &amp; quality</h2>
+    <div class="modal-sub">Every answered question is recorded with its latency, token usage and your feedback.</div>
+    <div id="statsBody">Loading…</div>
+    <div class="actions"><a class="btn" href="/api/feedback/export" download>Export feedback (JSONL)</a></div>
+  </div>
+</div>
+
+<!-- Review modal (#11) -->
+<div class="modal-backdrop" id="reviewModal">
+  <div class="modal">
+    <button class="icon-btn modal-close" id="reviewClose" title="Close">✕</button>
+    <h2>Review changes</h2>
+    <div class="modal-sub">Analyses what a change touches (symbols, callers, tests, includers) and reviews it with the selected model.</div>
+    <div class="tabs" id="reviewTabs">
+      <button data-tab="git" class="active">Git range</button>
+      <button data-tab="diff">Paste a diff</button>
+    </div>
+    <div id="reviewGit">
+      <div class="row">
+        <div><label for="reviewBase">Base</label><input id="reviewBase" list="refList" placeholder="HEAD~1"></div>
+        <div><label for="reviewHead">Head</label><input id="reviewHead" list="refList" placeholder="HEAD"></div>
+      </div>
+      <datalist id="refList"></datalist>
+      <div class="modal-sub" id="reviewCommits" style="margin-top:8px"></div>
+    </div>
+    <div id="reviewDiff" style="display:none">
+      <label for="reviewDiffText">Unified diff (git diff / a PR's .diff)</label>
+      <textarea id="reviewDiffText" placeholder="diff --git a/src/core/Foo.cpp b/src/core/Foo.cpp&#10;..."></textarea>
+    </div>
+    <div id="reviewSummary"></div>
+    <div class="actions">
+      <button class="btn" id="reviewAnalyze">Analyze</button>
+      <button class="btn primary" id="reviewRun" disabled>Run review</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -507,6 +555,9 @@ const els = {
   indexInfo: document.getElementById('indexInfo'),
   activeModelTag: document.getElementById('activeModelTag'),
   logoBtn: document.getElementById('logoBtn'),
+  statsBtn: document.getElementById('statsBtn'),
+  reviewBtn: document.getElementById('reviewBtn'),
+  explainFileBtn: document.getElementById('explainFileBtn'),
 };
 
 let threadId = null;
@@ -523,6 +574,7 @@ function applyTheme(mode) {
   else if (mode === 'dark') root.setAttribute('data-theme', 'dark');
   else root.removeAttribute('data-theme');
   document.querySelectorAll('#themeGroup button').forEach(b => b.classList.toggle('active', b.dataset.theme === mode));
+  if (window.rerenderDiagrams) window.rerenderDiagrams();   // Mermaid themes are baked into the SVG
 }
 let currentThemeMode = new URLSearchParams(location.search).get('theme')
   || localStorage.getItem('cqa-theme') || 'system';
@@ -698,6 +750,14 @@ function renderModuleChips(modules) {
     });
     els.moduleChips.appendChild(chip);
   }
+  if (selectedModule) {
+    const tour = document.createElement('div');
+    tour.className = 'module-chip tour-chip';
+    tour.textContent = '📖 Tour';
+    tour.title = `Explain the ${selectedModule} module to a new engineer`;
+    tour.addEventListener('click', () => startTour(selectedModule));
+    els.moduleChips.appendChild(tour);
+  }
 }
 
 // ======================= health =======================
@@ -792,13 +852,25 @@ async function switchThread(id) {
     const r = await fetch(`/api/threads/${id}/messages`);
     const d = await r.json();
     if (!d.messages || !d.messages.length) { resetToEmpty(false); return; }
+    let lastQuestion = '';
     for (const m of d.messages) {
-      if (m.role === 'user') addUserMessage(m.content, false);
+      if (m.role === 'user') { lastQuestion = m.content; addUserMessage(m.content, false, m.mode || 'qa'); }
       else {
-        const { bubble, citationsRow } = addAssistantShell(false);
+        // Threads recorded by the turn store restore their full trace, metrics and feedback.
+        const { assistantDiv, tracePanel, bubble, citationsRow } = addAssistantShell(false, !!m.trace);
         bubble.style.display = '';
-        bubble.innerHTML = formatAnswer(m.content);
+        setAnswerHtml(bubble, renderAnswer(m.content), false);
+        hydrateAnswer(bubble);
         renderCitationChips(citationsRow, m.citations || []);
+        if (m.trace) {
+          const traceBody = tracePanel.querySelector('.trace-body');
+          renderTraceEntries(traceBody, m.trace, lastQuestion);
+          renderTimeline(traceBody, m.trace);
+        }
+        attachFooter(assistantDiv, {
+          turn_id: m.turn_id, metrics: m.metrics, feedback: m.feedback,
+          cached: (m.trace || []).some(e => e.node === 'cache'),
+        });
       }
     }
     scrollBottom();
@@ -882,20 +954,21 @@ document.addEventListener('click', (e) => {
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
-function formatAnswer(text) {
+// Escape + citations + bold + inline code — for one-line snippets (trace previews).
+function formatInline(text) {
   let t = escapeHtml(text);
   t = t.replace(/([\w./-]+\.(?:cpp|h|hpp|cu|cuh|cc|inc)):(\d+(?:-\d+)?)/g,
     '<span class="citation">$1:$2</span>');
   t = t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
-  t = t.replace(/^### (.*)$/gm, '<h3>$1</h3>');
-  t = t.replace(/^## (.*)$/gm, '<h2>$1</h2>');
-  t = t.replace(/^# (.*)$/gm, '<h1>$1</h1>');
-  t = t.replace(/(^|\n)((?:- .*(?:\n|$))+)/g, (m, pre, block) => {
-    const items = block.trim().split('\n').map(l => `<li>${l.replace(/^- /, '')}</li>`).join('');
-    return `${pre}<ul>${items}</ul>`;
-  });
   return t;
+}
+// Full answer rendering (paragraphs, lists, tables, fenced code, diagrams) lives in render.js.
+function formatAnswer(text, opts) { return renderAnswer(text, opts); }
+function setAnswerHtml(bubble, html, streaming) {
+  bubble.classList.add('md');
+  bubble.classList.toggle('streaming', !!streaming);
+  bubble.innerHTML = html;
 }
 
 // ======================= chat =======================
@@ -911,11 +984,12 @@ els.input.addEventListener('keydown', (e) => {
 });
 els.sendBtn.addEventListener('click', send);
 
-function addUserMessage(q, doScroll = true) {
+function addUserMessage(q, doScroll = true, mode = 'qa') {
   els.emptyState.remove();
   const div = document.createElement('div');
   div.className = 'msg user';
-  div.innerHTML = `<div class="bubble">${escapeHtml(q)}</div>`;
+  const tag = mode === 'review' || mode === 'tour' ? `<span class="mode-tag">${mode}</span>` : '';
+  div.innerHTML = `<div class="bubble">${tag}${escapeHtml(q)}</div>`;
   els.thread.appendChild(div);
   if (doScroll) scrollBottom();
 }
@@ -940,21 +1014,172 @@ function renderCitationChips(row, citations) {
   }
 }
 
-function addAssistantShell(withLiveStatus = true) {
+// ----- trace steps: one renderer shared by live events and restored history -----
+function hitRowsHtml(hits) {
+  return (hits || []).slice(0, 12).map(h => {
+    const rr = (h.rerank !== null && h.rerank !== undefined) ? `<span class="rerank" title="reranker score">↕${h.rerank}</span>` : '';
+    const via = h.via ? `<span class="via-tag">${escapeHtml(h.via)}</span>` : '';
+    return `<div class="hit-row" data-path="${escapeHtml(h.path)}" data-start="${h.start_line}" data-end="${h.end_line}">
+      ${escapeHtml(h.path)}:${h.start_line}-${h.end_line} <span class="sym">${escapeHtml(h.symbol || '')}</span>${via}${rr}<span class="score">${h.score}</span>
+    </div>`;
+  }).join('');
+}
+// Returns the trace-step HTML for one event/trace-entry, or '' if it has nothing to show.
+function stepHtml(type, e, question) {
+  if (type === 'analyze') {
+    if (e.skipped) return '';
+    let h = '';
+    if (e.standalone && e.standalone !== question) h += `Rewritten: <span class="rewrite">${escapeHtml(e.standalone)}</span><br>`;
+    if ((e.queries || []).length) h += `Extra queries: ${e.queries.map(q => `<code>${escapeHtml(q.length > 90 ? q.slice(0, 90) + '…' : q)}</code>`).join(' ')}<br>`;
+    if ((e.sub_questions || []).length) h += `Plan (parallel): ${e.sub_questions.map(q => `<code>${escapeHtml(q)}</code>`).join(' ')}`;
+    if (e.error) h += `<span class="via-tag">analysis skipped: ${escapeHtml(e.error)}</span>`;
+    return traceStepHtml('analyze', h || 'no rewrite needed');
+  }
+  if (type === 'retrieve') {
+    const hits = e.hits || [];
+    if (e.mode && e.mode !== 'qa') return traceStepHtml('context', `${e.mode} context prepared from the index (no similarity search)`);
+    if (e.sub_question) {
+      return traceStepHtml('retrieve', `<div class="sub-q">${escapeHtml(e.sub_question)}</div>${hits.length} hits · thin=${e.thin}<div class="hit-rows">${hitRowsHtml(hits)}</div>`);
+    }
+    const bits = [`${hits.length} hits`, `thin=${e.thin}`, `symbol_resolved=${e.symbol_resolved}`];
+    if (e.reranked) bits.push('reranked');
+    if (e.expanded) bits.push(`+${e.expanded} via call graph`);
+    if ((e.sub_questions || []).length || e.joined) bits.push('merged from parallel sub-questions');
+    return traceStepHtml('retrieve', `${bits.join(' · ')}<div class="hit-rows">${hitRowsHtml(hits)}</div>`);
+  }
+  if (type === 'reason') {
+    const calls = e.tool_calls || [];
+    if (!calls.length) return '';
+    return traceStepHtml(e.forced ? 'forced' : 'reason',
+      `Tool call${calls.length > 1 ? 's' : ''}: <span class="tool-name">${calls.join(', ')}</span>`);
+  }
+  if (type === 'tools') {
+    return (e.calls || []).map(c => traceStepHtml('tool result',
+      `<span class="tool-name">${escapeHtml(c.tool)}(${escapeHtml(JSON.stringify(c.args))})</span>${c.ms !== undefined ? ` <span class="via-tag">${c.ms} ms</span>` : ''}<br>${formatInline((c.result_preview || '').slice(0, 220))}`)).join('');
+  }
+  if (type === 'cache') return traceStepHtml('cache', 'served from the tour cache (index unchanged since it was generated)');
+  return '';
+}
+function renderTraceEntries(traceBody, entries, question) {
+  let html = '';
+  for (const e of entries || []) {
+    const type = e.node === 'sub_retrieve' ? 'retrieve' : e.node;
+    html += stepHtml(type, e, question);
+  }
+  traceBody.innerHTML = html;
+}
+
+// ----- observability: latency timeline + one-line metrics -----
+const TIMELINE_LABELS = { analyze: 'analyze', retrieve: 'retrieve', reason: 'LLM', tools: 'tools', answer: 'answer' };
+function renderTimeline(traceBody, entries) {
+  const agg = { analyze: 0, retrieve: 0, reason: 0, tools: 0, answer: 0 };
+  let subMax = 0;
+  for (const e of entries || []) {
+    const ms = e.duration_ms || 0;
+    if (e.node === 'sub_retrieve') subMax = Math.max(subMax, ms);   // parallel branches overlap
+    else if (e.node in agg) agg[e.node] += ms;
+  }
+  agg.retrieve += subMax;
+  const total = Object.values(agg).reduce((a, b) => a + b, 0);
+  if (total <= 0) return;
+  const segs = Object.entries(agg).filter(([, v]) => v > 0);
+  const el = document.createElement('div');
+  el.className = 'timeline';
+  el.innerHTML = `<div class="bar">${segs.map(([k, v]) => `<div class="seg ${k}" style="width:${(v / total * 100).toFixed(1)}%" title="${TIMELINE_LABELS[k]}: ${v} ms"></div>`).join('')}</div>
+    <div class="legend">${segs.map(([k, v]) => `<span><i class="seg ${k}"></i>${TIMELINE_LABELS[k]} ${(v / 1000).toFixed(1)}s</span>`).join('')}</div>`;
+  traceBody.appendChild(el);
+}
+function compactNum(n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
+function metricsText(m, cached) {
+  if (!m) return '';
+  if (cached) return 'cached · instant';
+  const parts = [`${((m.latency_ms || 0) / 1000).toFixed(1)}s`];
+  const tok = (m.tokens_in || 0) + (m.tokens_out || 0);
+  if (tok) parts.push(`${compactNum(tok)} tok`);
+  if (m.cost_usd !== null && m.cost_usd !== undefined) parts.push(m.cost_usd === 0 ? 'local' : `$${m.cost_usd.toFixed(4)}`);
+  if (m.llm_calls) parts.push(`${m.llm_calls} LLM call${m.llm_calls > 1 ? 's' : ''}`);
+  if (m.tool_rounds) parts.push(`${m.tool_rounds} tool round${m.tool_rounds > 1 ? 's' : ''}`);
+  return parts.join(' · ');
+}
+
+// ----- feedback (👍 / 👎 + details) -----
+const FB_REASONS = ['Wrong file', 'Missed something', 'Hallucinated', 'Too vague', 'Other'];
+function attachFooter(assistantDiv, info) {
+  if (!info || !info.turn_id) return;
+  const footer = document.createElement('div');
+  footer.className = 'msg-footer';
+  const tip = info.metrics ? `in ${info.metrics.tokens_in || 0} / out ${info.metrics.tokens_out || 0} tokens` : '';
+  footer.innerHTML = `<span class="metrics" title="${tip}">${metricsText(info.metrics, info.cached)}</span>
+    <button class="fb-btn up" title="Good answer">👍</button>
+    <button class="fb-btn down" title="Bad answer — tell us why">👎</button>
+    <span class="fb-note"></span>`;
+  const formHolder = document.createElement('div');
+  assistantDiv.appendChild(footer);
+  assistantDiv.appendChild(formHolder);
+  const up = footer.querySelector('.up'), down = footer.querySelector('.down'), note = footer.querySelector('.fb-note');
+  let state = info.feedback || null;
+  const paint = () => {
+    up.classList.toggle('on', !!state && state.rating === 1);
+    down.classList.toggle('on', !!state && state.rating === -1);
+  };
+  paint();
+  async function save(rating, extra) {
+    try {
+      const r = await fetch('/api/feedback', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ turn_id: info.turn_id, rating, ...(extra || {}) }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      state = rating === 0 ? null : { rating, ...(extra || {}) };
+      note.textContent = rating === 0 ? '' : 'Saved ✓';
+      paint();
+    } catch (e) { note.textContent = 'Could not save feedback'; }
+  }
+  const closeForm = () => { formHolder.innerHTML = ''; };
+  function openForm() {
+    formHolder.innerHTML = `<div class="fb-form">
+      <div class="fb-reasons">${FB_REASONS.map(r => `<button data-r="${r}">${r}</button>`).join('')}</div>
+      <textarea rows="2" placeholder="What was wrong? (optional)"></textarea>
+      <input type="text" placeholder="Correct file(s), e.g. src/core/ThreadPool.cpp:51-81 (optional, comma-separated)">
+      <div class="fb-actions"><button class="primary submit">Send details</button><button class="cancel">Close</button></div></div>`;
+    let reason = (state && state.reason) || '';
+    const chips = formHolder.querySelectorAll('.fb-reasons button');
+    chips.forEach(b => {
+      b.classList.toggle('on', b.dataset.r === reason);
+      b.addEventListener('click', () => { reason = b.dataset.r; chips.forEach(x => x.classList.toggle('on', x === b)); });
+    });
+    const ta = formHolder.querySelector('textarea'), inp = formHolder.querySelector('input');
+    if (state && state.comment) ta.value = state.comment;
+    if (state && state.correct_paths && state.correct_paths.length) inp.value = state.correct_paths.join(', ');
+    formHolder.querySelector('.cancel').addEventListener('click', closeForm);
+    formHolder.querySelector('.submit').addEventListener('click', async () => {
+      await save(-1, { reason, comment: ta.value.trim(), correct_paths: inp.value.split(',').map(s => s.trim()).filter(Boolean) });
+      closeForm();
+    });
+  }
+  up.addEventListener('click', () => { closeForm(); save(state && state.rating === 1 ? 0 : 1, {}); });
+  down.addEventListener('click', async () => {
+    if (state && state.rating === -1) { closeForm(); save(0, {}); return; }
+    await save(-1, {});   // record the thumbs-down immediately; details are optional
+    openForm();
+  });
+}
+
+function addAssistantShell(withLiveStatus = true, withTrace = withLiveStatus) {
   const assistantDiv = document.createElement('div');
   assistantDiv.className = 'msg assistant';
   let liveStatus = null;
   if (withLiveStatus) {
     liveStatus = document.createElement('div');
     liveStatus.className = 'live-status';
-    liveStatus.innerHTML = '<div class="spinner"></div><span>Retrieving…</span>';
+    liveStatus.innerHTML = '<div class="spinner"></div><span>Analyzing…</span>';
     assistantDiv.appendChild(liveStatus);
   }
   const tracePanel = document.createElement('div');
   tracePanel.className = 'trace-panel';
   tracePanel.innerHTML = `<div class="trace-toggle"><span class="chevron">▶</span><span>Show reasoning trace</span></div><div class="trace-body"></div>`;
   tracePanel.querySelector('.trace-toggle').addEventListener('click', () => tracePanel.classList.toggle('open'));
-  if (withLiveStatus) assistantDiv.appendChild(tracePanel);
+  if (withTrace) assistantDiv.appendChild(tracePanel);
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
@@ -969,37 +1194,33 @@ function addAssistantShell(withLiveStatus = true) {
   return { assistantDiv, liveStatus, tracePanel, bubble, citationsRow };
 }
 
-async function send() {
-  const q = els.input.value.trim();
-  if (!q || busy) return;
-  els.input.value = '';
-  els.input.style.height = 'auto';
+// One streamed turn: chat question, review, or tour. `buildUrl` runs at start so it sees the
+// current threadId; every mode shares the same event handling below.
+async function runStream(label, buildUrl, mode = 'qa') {
+  if (busy) return;
   busy = true;
   els.sendBtn.disabled = true;
 
-  addUserMessage(q);
-  const { liveStatus, tracePanel, bubble, citationsRow } = addAssistantShell(true);
-  const traceBody = tracePanel.querySelector('.trace-body');
+  addUserMessage(label, true, mode);
+  const shell = addAssistantShell(true);
+  const ctx = { ...shell, traceBody: shell.tracePanel.querySelector('.trace-body'), buf: '', raf: 0, question: label };
   scrollBottom();
 
   await new Promise((resolve) => {
-    const params = new URLSearchParams({ question: q, provider: selectedProvider, model: selectedModel || '' });
-    if (threadId) params.set('thread_id', threadId);
-    if (selectedModule) params.set('module', selectedModule);
-    const es = new EventSource('/api/chat/stream?' + params.toString());
+    const es = new EventSource(buildUrl());
     let settled = false;
     const finish = () => { if (settled) return; settled = true; es.close(); resolve(); };
 
-    for (const evt of ['retrieve', 'reason', 'tools', 'final', 'error']) {
+    for (const evt of ['tour', 'analyze', 'retrieve', 'reason', 'tools', 'token', 'token_reset', 'final', 'error']) {
       es.addEventListener(evt, (e) => {
         let payload;
         try { payload = JSON.parse(e.data); } catch { return; }
-        handleEvent(payload, liveStatus, traceBody, bubble, citationsRow);
+        handleEvent(payload, ctx);
         if (evt === 'final' || evt === 'error') finish();
       });
     }
     es.onerror = () => {
-      if (!settled) liveStatus.innerHTML = `<span style="color:var(--danger)">Connection lost.</span>`;
+      if (!settled && ctx.liveStatus.isConnected) ctx.liveStatus.innerHTML = `<span style="color:var(--danger)">Connection lost.</span>`;
       finish();
     };
   });
@@ -1008,6 +1229,40 @@ async function send() {
   els.sendBtn.disabled = false;
   loadThreads();
   scrollBottom();
+}
+
+function chatUrl(q) {
+  const params = new URLSearchParams({ question: q, provider: selectedProvider, model: selectedModel || '' });
+  if (threadId) params.set('thread_id', threadId);
+  if (selectedModule) params.set('module', selectedModule);
+  return '/api/chat/stream?' + params.toString();
+}
+async function send() {
+  const q = els.input.value.trim();
+  if (!q || busy) return;
+  els.input.value = '';
+  els.input.style.height = 'auto';
+  await runStream(q, () => chatUrl(q), 'qa');
+}
+
+// ----- review + tour launchers (each starts a fresh conversation) -----
+function llmParams() {
+  const p = new URLSearchParams({ provider: selectedProvider, model: selectedModel || '' });
+  if (threadId) p.set('thread_id', threadId);
+  return p;
+}
+async function startReview(reviewId, title) {
+  if (busy) return;
+  threadId = null; resetToEmpty(); closeSourcePanel();
+  const p = llmParams(); p.set('review_id', reviewId);
+  await runStream(title, () => '/api/review/stream?' + p.toString(), 'review');
+}
+async function startTour(target, refresh = false) {
+  if (busy || !target) return;
+  threadId = null; resetToEmpty();
+  const p = llmParams(); p.set('target', target);
+  if (refresh) p.set('refresh', '1');
+  await runStream(`Explain ${target}`, () => '/api/tour/stream?' + p.toString(), 'tour');
 }
 
 // ======================= fun status flavor text =======================
@@ -1049,42 +1304,168 @@ function funToolStatus(tools) {
   return tpl.replace(/\{tool\}/g, label);
 }
 
-function handleEvent(payload, liveStatus, traceBody, bubble, citationsRow) {
-  if (payload.type === 'retrieve') {
-    const hits = payload.hits || [];
-    const thinNote = payload.thin ? ' (thin — will use tools)' : '';
-    liveStatus.querySelector('span:last-child').textContent = `Retrieved ${hits.length} chunks${thinNote}…`;
-    const rowsHtml = hits.slice(0, 8).map(h =>
-      `<div class="hit-row" data-path="${h.path}" data-start="${h.start_line}" data-end="${h.end_line}">
-        ${h.path}:${h.start_line}-${h.end_line} <span class="sym">${h.symbol||''}</span> <span class="score">${h.score}</span>
-      </div>`).join('');
-    traceBody.insertAdjacentHTML('beforeend', traceStepHtml('retrieve',
-      `${hits.length} hits · thin=${payload.thin} · symbol_resolved=${payload.symbol_resolved}<div class="hit-rows">${rowsHtml}</div>`));
-  } else if (payload.type === 'reason') {
-    const calls = payload.tool_calls || [];
+function handleEvent(p, ctx) {
+  const { liveStatus, traceBody, bubble, citationsRow } = ctx;
+  const status = (txt) => {
+    const s = liveStatus && liveStatus.isConnected ? liveStatus.querySelector('span:last-child') : null;
+    if (s) s.textContent = txt;
+  };
+  const addStep = (html) => { if (html) traceBody.insertAdjacentHTML('beforeend', html); };
+
+  if (p.type === 'tour') {
+    status(`Preparing a tour of ${p.target}…`);
+  } else if (p.type === 'analyze') {
+    addStep(stepHtml('analyze', p, ctx.question));
+    status('Retrieving…');
+  } else if (p.type === 'retrieve') {
+    if (p.sub_question) status(`Retrieving for: ${p.sub_question.slice(0, 60)}…`);
+    else status(`Retrieved ${(p.hits || []).length} chunks${p.thin ? ' (thin — will use tools)' : ''}…`);
+    addStep(stepHtml('retrieve', p, ctx.question));
+  } else if (p.type === 'reason') {
+    const calls = p.tool_calls || [];
     if (calls.length) {
-      liveStatus.querySelector('span:last-child').textContent = funToolStatus(calls);
-      traceBody.insertAdjacentHTML('beforeend', traceStepHtml(payload.forced ? 'forced' : 'reason',
-        `Tool call${calls.length>1?'s':''}: <span class="tool-name">${calls.join(', ')}</span>`));
+      // Text streamed before a tool call was the model thinking out loud, not the answer.
+      if (ctx.buf.trim()) addStep(traceStepHtml('thinking', `<div class="thinking">${escapeHtml(ctx.buf.trim())}</div>`));
+      ctx.buf = '';
+      if (ctx.raf) { cancelAnimationFrame(ctx.raf); ctx.raf = 0; }
+      bubble.style.display = 'none';
+      bubble.classList.remove('streaming');
+      status(funToolStatus(calls));
+      addStep(stepHtml('reason', p, ctx.question));
     } else {
-      liveStatus.querySelector('span:last-child').textContent = 'Composing answer…';
+      status('Composing answer…');
     }
-  } else if (payload.type === 'tools') {
-    for (const c of (payload.calls || [])) {
-      traceBody.insertAdjacentHTML('beforeend', traceStepHtml('tool result',
-        `<span class="tool-name">${c.tool}(${escapeHtml(JSON.stringify(c.args))})</span><br>${formatAnswer((c.result_preview||'').slice(0,220))}`));
+  } else if (p.type === 'tools') {
+    addStep(stepHtml('tools', p, ctx.question));
+  } else if (p.type === 'token') {
+    ctx.buf += p.text;
+    if (!ctx.raf) {
+      ctx.raf = requestAnimationFrame(() => {
+        ctx.raf = 0;
+        bubble.style.display = '';
+        setAnswerHtml(bubble, renderAnswer(ctx.buf, { streaming: true }), true);
+        scrollBottom();
+      });
     }
-  } else if (payload.type === 'final') {
-    threadId = payload.thread_id;
-    liveStatus.remove();
+  } else if (p.type === 'token_reset') {
+    ctx.buf = '';
+    if (ctx.raf) { cancelAnimationFrame(ctx.raf); ctx.raf = 0; }
+    bubble.style.display = 'none';
+  } else if (p.type === 'final') {
+    if (ctx.raf) { cancelAnimationFrame(ctx.raf); ctx.raf = 0; }
+    threadId = p.thread_id;
+    if (liveStatus) liveStatus.remove();
     bubble.style.display = '';
-    bubble.innerHTML = formatAnswer(payload.answer || '(no answer)');
-    renderCitationChips(citationsRow, payload.citations || []);
-  } else if (payload.type === 'error') {
-    liveStatus.innerHTML = `<span style="color:var(--danger)">Error: ${escapeHtml(payload.message)}</span>`;
+    setAnswerHtml(bubble, renderAnswer(p.answer || '(no answer)'), false);
+    hydrateAnswer(bubble);
+    renderCitationChips(citationsRow, p.citations || []);
+    if (p.cached) addStep(stepHtml('cache', p, ctx.question));
+    renderTimeline(traceBody, p.trace || []);
+    attachFooter(ctx.assistantDiv, { turn_id: p.turn_id, metrics: p.metrics, cached: p.cached, feedback: null });
+  } else if (p.type === 'error') {
+    if (liveStatus && liveStatus.isConnected) liveStatus.innerHTML = `<span style="color:var(--danger)">Error: ${escapeHtml(p.message)}</span>`;
   }
   scrollBottom();
 }
+
+// ======================= stats modal (#18) =======================
+const statsModal = document.getElementById('statsModal');
+function fmtMs(ms) { return ms === null || ms === undefined ? '—' : (ms / 1000).toFixed(1) + 's'; }
+async function openStats() {
+  statsModal.classList.add('open');
+  const body = document.getElementById('statsBody');
+  body.textContent = 'Loading…';
+  try {
+    const d = await (await fetch('/api/stats')).json();
+    const o = d.overall || {};
+    if (!o.turns) { body.innerHTML = '<div class="modal-sub">No answers recorded yet — ask something first.</div>'; return; }
+    const card = (v, k) => `<div class="stats-card"><div class="v">${v}</div><div class="k">${k}</div></div>`;
+    const rate = o.thumbs_up_rate === null || o.thumbs_up_rate === undefined ? '—' : Math.round(o.thumbs_up_rate * 100) + '%';
+    let html = `<div class="stats-cards">
+      ${card(o.turns, 'answers')}${card(fmtMs(o.latency_p50_ms), 'latency p50')}${card(fmtMs(o.latency_p95_ms), 'latency p95')}
+      ${card(compactNum(o.avg_tokens_in + o.avg_tokens_out), 'avg tokens / answer')}${card(rate, `👍 rate (${o.thumbs_up}👍 ${o.thumbs_down}👎)`)}
+    </div>`;
+    html += `<table class="stats-table"><thead><tr><th>model</th><th>answers</th><th>p50</th><th>p95</th><th>avg tok in/out</th><th>tool rounds</th><th>cost</th><th>👍 rate</th></tr></thead><tbody>`;
+    for (const m of d.by_model || []) {
+      const r = m.thumbs_up_rate === null || m.thumbs_up_rate === undefined ? '—' : Math.round(m.thumbs_up_rate * 100) + '%';
+      const cost = m.total_cost_usd === null || m.total_cost_usd === undefined ? '—' : (m.total_cost_usd === 0 ? 'local' : '$' + m.total_cost_usd.toFixed(3));
+      html += `<tr><td>${escapeHtml(m.provider)} · ${escapeHtml(m.model)}</td><td>${m.turns}</td><td>${fmtMs(m.latency_p50_ms)}</td><td>${fmtMs(m.latency_p95_ms)}</td>
+        <td>${compactNum(m.avg_tokens_in)} / ${compactNum(m.avg_tokens_out)}</td><td>${m.avg_tool_rounds}</td><td>${cost}</td><td>${r}</td></tr>`;
+    }
+    body.innerHTML = html + '</tbody></table>';
+  } catch (e) { body.textContent = 'Could not load stats.'; }
+}
+els.statsBtn.addEventListener('click', openStats);
+document.getElementById('statsClose').addEventListener('click', () => statsModal.classList.remove('open'));
+statsModal.addEventListener('click', (e) => { if (e.target === statsModal) statsModal.classList.remove('open'); });
+
+// ======================= review modal (#11) =======================
+const reviewModal = document.getElementById('reviewModal');
+const rv = {
+  base: document.getElementById('reviewBase'), head: document.getElementById('reviewHead'),
+  diff: document.getElementById('reviewDiffText'), summary: document.getElementById('reviewSummary'),
+  analyze: document.getElementById('reviewAnalyze'), run: document.getElementById('reviewRun'),
+  git: document.getElementById('reviewGit'), diffWrap: document.getElementById('reviewDiff'),
+  commits: document.getElementById('reviewCommits'), refList: document.getElementById('refList'),
+};
+let reviewTab = 'git';
+let reviewPrepared = null;   // {review_id, title}
+function resetReviewPrep() { reviewPrepared = null; rv.run.disabled = true; rv.summary.innerHTML = ''; }
+async function openReview() {
+  reviewModal.classList.add('open');
+  resetReviewPrep();
+  try {
+    const d = await (await fetch('/api/review/refs')).json();
+    if (!rv.base.value) rv.base.value = d.default_base || '';
+    if (!rv.head.value) rv.head.value = d.default_head || '';
+    rv.refList.innerHTML = (d.refs || []).map(r => `<option value="${escapeHtml(r)}">`).join('');
+    rv.commits.innerHTML = (d.commits || []).length
+      ? 'Recent commits: ' + d.commits.slice(0, 6).map(c => `<code title="${escapeHtml(c.subject)}">${escapeHtml(c.sha)}</code>`).join(' ') : '';
+  } catch (e) { /* the inputs still work without suggestions */ }
+}
+document.getElementById('reviewTabs').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-tab]');
+  if (!b) return;
+  reviewTab = b.dataset.tab;
+  document.querySelectorAll('#reviewTabs button').forEach(x => x.classList.toggle('active', x === b));
+  rv.git.style.display = reviewTab === 'git' ? '' : 'none';
+  rv.diffWrap.style.display = reviewTab === 'diff' ? '' : 'none';
+  resetReviewPrep();
+});
+rv.analyze.addEventListener('click', async () => {
+  resetReviewPrep();
+  rv.analyze.disabled = true;
+  rv.summary.innerHTML = '<div class="summary">Analyzing…</div>';
+  try {
+    const body = reviewTab === 'git'
+      ? { base: rv.base.value.trim() || null, head: rv.head.value.trim() || null }
+      : { diff: rv.diff.value };
+    const r = await fetch('/api/review/prepare', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'analysis failed');
+    reviewPrepared = { review_id: d.review_id, title: d.title };
+    const s = d.stats || {};
+    rv.summary.innerHTML = `<div class="summary"><b>${escapeHtml(d.title)}</b><br>
+      ${s.files} files · +${s.additions} −${s.deletions} lines · ${s.changed_symbols} changed symbols
+      · ${s.tests_calling_changed} test callers${s.omitted_files ? ` · ${s.omitted_files} files trimmed from the prompt` : ''}
+      ${(d.warnings || []).map(w => `<div class="warn">⚠ ${escapeHtml(w)}</div>`).join('')}</div>`;
+    rv.run.disabled = false;
+  } catch (e) {
+    rv.summary.innerHTML = `<div class="err">${escapeHtml(e.message)}</div>`;
+  } finally { rv.analyze.disabled = false; }
+});
+rv.run.addEventListener('click', () => {
+  if (!reviewPrepared) return;
+  const { review_id, title } = reviewPrepared;
+  reviewModal.classList.remove('open');
+  startReview(review_id, title);
+});
+els.reviewBtn.addEventListener('click', openReview);
+document.getElementById('reviewClose').addEventListener('click', () => reviewModal.classList.remove('open'));
+reviewModal.addEventListener('click', (e) => { if (e.target === reviewModal) reviewModal.classList.remove('open'); });
+
+// "Explain" in the source panel header -> onboarding tour of the file that is open
+els.explainFileBtn.addEventListener('click', () => { if (lastSource.path) startTour(lastSource.path); });
 
 // ======================= init =======================
 // Deep-link support: ?thread=<id> restores a conversation, &source=<path>:<start>-<end>

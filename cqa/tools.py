@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .callgraph import CallGraph, to_mermaid
 from .config import Config
 from .symbol_index import SymbolIndex, find_usages
 
@@ -125,6 +126,41 @@ def symbol_usages(cfg: Config, name: str, limit: int = 30) -> dict:
     return {"symbol": name, "usages": hits}
 
 
+def call_graph_tool(
+    graph: CallGraph | None, symbols: SymbolIndex, name: str, direction: str = "both", depth: int = 1
+) -> dict:
+    """Static call-graph neighborhood of a symbol, plus ready-to-embed Mermaid source.
+
+    Edges are name-based (no type resolution) — see cqa/callgraph.py — so they are a strong
+    hint, not proof; `symbol_usages` is the ground-truth (grep) fallback."""
+    if graph is None:
+        return {"error": "no call graph built — re-run scripts/index_luxtrace.py"}
+    direction = direction if direction in ("callees", "callers", "both") else "both"
+    depth = max(1, min(int(depth or 1), 3))
+    defs = symbols.lookup(name)
+    if not defs:
+        return {"error": f"unknown symbol: {name}", "hint": "use search_symbols to find the exact name"}
+    full_names = list(dict.fromkeys(d.name for d in defs))
+    root = full_names[0]
+    sub = graph.subgraph(root, direction, depth)
+    out = {
+        "symbol": root,
+        "direction": direction,
+        "depth": depth,
+        "edges": [f"{a} -> {b}" for a, b in sub["edges"]],
+        "truncated": sub["truncated"],
+        "mermaid": to_mermaid(root, sub),
+        "note": "static, name-based call edges: may miss calls through function pointers/virtuals "
+        "and over-link same-named methods. Verify important claims with symbol_usages/read_file.",
+    }
+    if len(full_names) > 1:
+        out["alternatives"] = full_names[1:6]
+    if not sub["edges"]:
+        out["note"] = ("no resolved call edges for this symbol (it may only be called via member "
+                       "access on a variable, or be a leaf) — try symbol_usages. " + out["note"])
+    return out
+
+
 def _def_dict(d) -> dict:
     return {
         "name": d.name,
@@ -210,6 +246,67 @@ TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
                 "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "call_graph",
+            "description": (
+                "Static call graph around a symbol: who it calls (callees) and/or who calls it "
+                "(callers), up to 3 hops. Returns edges plus a `mermaid` flowchart. USE THIS when "
+                "the user asks for a diagram / flow / call graph / 'draw ...'; paste the returned "
+                "`mermaid` verbatim in a ```mermaid fenced block. Name-based and approximate — "
+                "callers reached through member access may be missing; confirm with symbol_usages."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "e.g. Simulation::run or RayTracer::trace"},
+                    "direction": {"type": "string", "enum": ["callees", "callers", "both"], "default": "both"},
+                    "depth": {"type": "integer", "default": 1, "description": "hops, 1-3"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_log",
+            "description": (
+                "Commit history of a file, or of a specific line range (git log -L): who changed it, "
+                "when, and the commit subject. Use for 'why was this changed / when was this added'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer", "description": "optional: restrict to these lines"},
+                    "end_line": {"type": "integer"},
+                    "limit": {"type": "integer", "default": 8},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "git_blame",
+            "description": (
+                "Who last changed the lines in a range: commits (hash, author name, date, subject) "
+                "with the number of lines each owns. Use for ownership questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
+                "required": ["path", "start_line"],
             },
         },
     },

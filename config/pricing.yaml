@@ -1,0 +1,15 @@
+# Optional USD price table for the cost estimate shown under each answer (#18).
+# Lookup order: "<provider>/<model>", then "<provider>/*". Models with no entry show
+# token counts only — no cost is ever guessed. Prices are per *million* tokens; fill in
+# current numbers from your provider's pricing page.
+#
+# Example:
+#   "anthropic/claude-sonnet-5":
+#     in_per_mtok: 0.0
+#     out_per_mtok: 0.0
+
+# Ollama runs on your own hardware (cloud-routed ":cloud" models are billed by Ollama's
+# plan, not per token) — no per-token cost is attributed.
+"ollama/*":
+  in_per_mtok: 0
+  out_per_mtok: 0

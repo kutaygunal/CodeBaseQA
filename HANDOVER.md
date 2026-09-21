@@ -99,6 +99,43 @@ context window and pasting more.
 
 ---
 
+## 3a. Added after this handover was first written (same day)
+
+The inventory above is the original 3.6k-line core. These features were layered on afterwards;
+none changes the retrieval math's *meaning* (§4 still holds), but several touch files listed
+above, so read this before adapting:
+
+| Area | New / changed files | What it does |
+|---|---|---|
+| Rerank, rewrite, expansion | `cqa/rerank.py`, `cqa/query_analysis.py`, `cqa/retriever.py` (`search_ex`, `SearchResult`, `gate_score`) | Cross-encoder rerank (fastembed), standalone-question rewrite + HyDE + sub-question plan, call-graph neighbor expansion. `Retriever.search()` is kept as a thin wrapper. |
+| Contextual chunks | `cqa/contextual.py`, `cqa/ingest.py` | LLM context sentence per chunk before embed/BM25; sha256-keyed cache makes rebuilds free. Biggest single quality win (bench MRR .51 → .82). |
+| Call graph | `cqa/callgraph.py`, `.index/graph.json`, `call_graph` tool | tree-sitter `call_expression` → name-resolved edges + include graph + header/impl pairs. **Static and name-based** — see the module docstring for what it conflates. |
+| Git tools | `cqa/gittools.py` | `git_log` (line-range history via `-L`), `git_blame`; argv-only subprocess, `_safe_resolve` paths, validated refs, author emails dropped. |
+| Per-turn store | `cqa/turns.py` | `turns` / `feedback` / `tours` tables in `conversations.sqlite`; latency, tokens, cost (from `config/pricing.yaml`), trace, 👍/👎. `Agent.history()` reads it first, so reopened threads keep their traces. |
+| Graph reshaping | `cqa/graph.py`, `cqa/agent.py`, `cqa/llm.py` | `analyze` node + parallel `sub_retrieve` (LangGraph `Send`); `trace`/`sub_results` use an appending reducer reset with `Overwrite` each turn; token streaming via `get_stream_writer` (`stream_mode=["updates","custom"]`); `mode` = `qa`/`review`/`tour`. |
+| Streaming | `cqa/providers.py` (`chat_stream`, `usage`) | Ollama / OpenAI-compatible / Anthropic all yield text deltas then a final `ChatResult`. `cqa/llm.py::call_model` is the single fallback+streaming entry point. |
+| Review / tour | `cqa/review.py`, `cqa/onboard.py`, `web/server.py` (`/api/review/*`, `/api/tour/stream`) | Deterministic evidence → same graph in review/tour mode. Tours are cached per (target, index build, provider, model). |
+| UI | `web/static/render.js`, `web/static/extras.css`, `web/static/index.html` | Block-level answer renderer (tables, fenced code, Mermaid), feedback, metrics, timeline, stats + review modals. |
+| Evaluation | `scripts/retrieval_bench.py`, `eval/bench_cases.yaml`, `scripts/feedback_report.py` | 25 hand-labeled retrieval cases (recall@k, MRR per toggle). Relabel for a new target — the labels are LuxTrace-specific. |
+
+Things to know when scaling to the multi-repo target (§5) that these additions change:
+
+- **Graph/contextual build cost scales with chunk count.** Contextual embeddings are ~1 LLM
+  call per chunk; at 100k+ chunks they need the incremental indexing of §5.7 first (the cache
+  helps only for *unchanged* chunks) and probably a cheaper `ingest.contextual.model`.
+- **`callers` of ubiquitous names are missing by design** (names with >3 definitions are skipped
+  as ambiguous). In a multi-language repo the same-name collision rate rises; consider raising
+  `MAX_CANDIDATES` only together with type/receiver resolution.
+- **Symbol keys are bare strings** in `callgraph.py` and `review.py` (`Class::method`). §5.4's
+  `(repo, project, language)` metadata needs to be threaded through `SymbolDef`, the graph keys,
+  and `_symbol_row` in the retriever before these features are correct across projects.
+- **Review line-mapping is exact only when the diff head equals the indexed commit**; the
+  server warns otherwise.
+- **The reranker is off by default** because on the contextual index it did not beat plain
+  hybrid retrieval (see README "Retrieval quality"). Re-measure on the new target.
+
+---
+
 ## 4. Core design decisions — preserve these, they're load-bearing
 
 1. **tree-sitter over libclang/native parsers.** No toolchain, no compile database, pip
@@ -493,7 +530,7 @@ anthropic>=0.40.0
 langgraph-checkpoint-sqlite>=2.0.0
 ```
 
-Ollama daemon must be running with `nomic-embed-text` pulled (embeddings, always local) and
+Ollama daemon must be running with `qwen3-embedding:4b` pulled (embeddings, always local) and
 whichever chat model(s) you configure available (`ollama list` to check). No API keys required
 for the baseline; OpenAI/Anthropic/GitHub Models are optional, added via `.env` or pasted into
 the web UI's Settings panel (kept in server memory only, never written to disk).

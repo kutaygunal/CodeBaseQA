@@ -1,0 +1,64 @@
+# Hand-labeled retrieval cases for scripts/retrieval_bench.py.
+# A case "hits" at rank k when ANY path in `expect` appears at position k of the retrieved
+# list. Labels were checked against the symbol index of ../LuxTrace (see git_commit in
+# .index/state.json) — if you re-target the repo, relabel. `history` (optional) gives prior
+# turns so follow-up rewriting can be measured.
+cases:
+  - q: "How is polarisation tracked through reflections using Stokes vectors and Mueller matrices?"
+    expect: [src/core/Polarisation.cpp, src/core/Polarisation.h]
+  - q: "How are Sobol low-discrepancy sequences generated and scrambled for sampling?"
+    expect: [src/core/Sampling.cpp, src/core/Sampling.h]
+  - q: "How does the code write ZIP archives with CRC checksums?"
+    expect: [src/core/ZipWriter.cpp, src/core/ZipWriter.h]
+  - q: "How does the thread pool distribute parallel work across worker threads?"
+    expect: [src/core/ThreadPool.cpp, src/core/ThreadPool.h]
+  - q: "Where is the GGX microfacet distribution evaluated for rough surfaces?"
+    expect: [src/core/Bsdf.cpp, src/gpu/GpuTrace.cu]
+  - q: "How are thin-film anti-reflection coating reflectances computed?"
+    expect: [src/core/Coating.cpp, src/core/Coating.h]
+  - q: "How is an HDR environment map importance-sampled for lighting?"
+    expect: [src/core/EnvironmentMap.cpp, src/core/EnvironmentMap.h]
+  - q: "How does the application discover installed Python interpreters on the machine?"
+    expect: [src/core/PythonEnv.cpp, src/core/PythonEnv.h]
+  - q: "How is imported CAD geometry audited for free edges and zero-area faces?"
+    expect: [src/core/CadImport.cpp, src/core/CadImport.h]
+  - q: "How is the simulation result cache keyed so repeated runs reuse results?"
+    expect: [src/core/Simulation.cpp, src/core/Simulation.h]
+  - q: "How does the background worker thread start and cancel a simulation run?"
+    expect: [src/core/SimulationWorker.cpp, src/core/SimulationWorker.h]
+  - q: "How are encircled energy and spot size metrics computed from the traced rays?"
+    expect: [src/core/Analysis.cpp, src/core/Analysis.h]
+  - q: "How are user-supplied ray files loaded and unit-scaled?"
+    expect: [src/core/RayFile.cpp, src/core/RayFile.h]
+  - q: "What happens when no GPU is available — what does the stub backend return?"
+    expect: [src/gpu/GpuTraceStub.cpp, src/gpu/GpuTrace.h]
+  - q: "How are metasurface diffraction orders and beam deflection modelled?"
+    expect: [src/core/Metasurface.cpp, src/core/Metasurface.h]
+  - q: "How are optical glass materials loaded from AGF catalog files?"
+    expect: [src/core/MaterialFile.cpp, src/core/MaterialFile.h]
+  - q: "How are parameter sweeps and tolerance studies started in the background?"
+    expect: [src/core/StudyWorker.cpp, src/core/StudyWorker.h, src/core/Studies.cpp]
+  - q: "How does the backward path tracer produce a luminance image from a camera?"
+    expect: [src/core/BackwardTracer.cpp, src/core/BackwardTracer.h]
+  - q: "How is a diagnostics bundle saved for bug reports?"
+    expect: [src/core/Diagnostics.cpp, src/core/Diagnostics.h]
+  - q: "How are scene emitters converted into light sources for the appearance preview?"
+    expect: [src/render/AppearanceEmitters.cpp, src/render/AppearanceEmitters.h]
+  - q: "How do log files get rotated when they grow large?"
+    expect: [src/core/Logging.cpp, src/core/Logging.h]
+  # Graph-reachability cases: the answer lives one call away from the obvious hit.
+  - q: "When Simulation::run is called, what does it use to actually trace the rays?"
+    expect: [src/core/RayTracer.cpp]
+  - q: "What does StudyWorker::startSweep call to evaluate each point of a sweep?"
+    expect: [src/core/Studies.cpp, src/core/Simulation.cpp, src/core/RayTracer.cpp]
+  # Follow-ups: retrieval on the bare fragment is weak; rewriting should recover the topic.
+  - q: "And how does it handle cancellation?"
+    history:
+      - {role: user, content: "How does SimulationWorker run a simulation in the background?"}
+      - {role: assistant, content: "SimulationWorker::startRun launches SimulationWorker::run on a worker thread (src/core/SimulationWorker.cpp) which calls Simulation and emits partial results."}
+    expect: [src/core/SimulationWorker.cpp, src/core/SimulationWorker.h]
+  - q: "Which file defines the struct that stores that?"
+    history:
+      - {role: user, content: "What does a loaded ray file contain?"}
+      - {role: assistant, content: "A RayFileData holds the source rays with power and extent, loaded by RayFile::load (src/core/RayFile.cpp)."}
+    expect: [src/core/RayFile.h]

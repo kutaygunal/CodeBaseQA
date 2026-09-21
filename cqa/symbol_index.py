@@ -73,6 +73,25 @@ class SymbolIndex:
     def all_names(self) -> list[str]:
         return sorted(self._by_full_name.keys())
 
+    def full_names_for_bare(self, bare: str) -> list[str]:
+        """Every indexed full name ('Class::method' or free function) ending in `bare`."""
+        return sorted(self._bare_to_full.get(bare, ()))
+
+    def definitions(self, full_name: str) -> list[SymbolDef]:
+        return self._by_full_name.get(full_name, [])
+
+    def defs_in_path(self, path: str) -> list[SymbolDef]:
+        """Every definition in a file, ordered by start line (built lazily, then cached)."""
+        if not hasattr(self, "_by_path"):
+            by_path: dict[str, list[SymbolDef]] = {}
+            for defs in self._by_full_name.values():
+                for d in defs:
+                    by_path.setdefault(d.path, []).append(d)
+            for v in by_path.values():
+                v.sort(key=lambda d: (d.start_line, d.end_line))
+            self._by_path = by_path
+        return self._by_path.get(path, [])
+
     def resolves(self, name: str) -> bool:
         return bool(self.lookup(name))
 

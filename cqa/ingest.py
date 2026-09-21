@@ -13,6 +13,7 @@ from pathlib import Path
 
 from rank_bm25 import BM25Okapi
 
+from .callgraph import CallGraph
 from .chunks_cpp import Chunk, chunk_cpp_file, chunk_text_file
 from .config import Config, load_config
 from .store import embed_texts, get_chroma_collection
@@ -91,10 +92,14 @@ def chunk_repo(cfg: Config) -> tuple[list[Chunk], list[str]]:
     return chunks, skipped
 
 
-def build_index(cfg: Config | None = None, progress=print) -> dict:
-    """Full (re)build: chunk -> embed -> Chroma -> BM25 -> symbol index -> state file."""
+def build_index(cfg: Config | None = None, progress=print, contextual: bool | None = None) -> dict:
+    """Full (re)build: chunk -> embed -> Chroma -> BM25 -> symbol index -> call graph -> state file.
+
+    `contextual` (default: config `ingest.contextual.enabled`) prepends an LLM-written
+    context sentence to each chunk before embedding/BM25 — see cqa/contextual.py."""
     cfg = cfg or load_config()
     t0 = time.time()
+    use_contextual = cfg.ingest.contextual.enabled if contextual is None else contextual
 
     progress(f"Walking {cfg.repo.root} ...")
     chunks, skipped = chunk_repo(cfg)
@@ -109,9 +114,29 @@ def build_index(cfg: Config | None = None, progress=print) -> dict:
     symbols.save(cfg.storage.index_state_file.parent / "symbols.json")
     progress(f"  {len(symbols.all_names())} unique symbols")
 
+    progress("Building call graph ...")
+    graph = CallGraph.build(chunks, symbols, cfg.repo.root)
+    graph.save(cfg.storage.index_state_file.parent / "graph.json")
+    progress(
+        f"  {sum(len(v) for v in graph.callees.values())} call edges, "
+        f"{sum(len(v) for v in graph.includes.values())} include edges, {len(graph.pairs) // 2} header/impl pairs"
+    )
+
+    texts = [c.text for c in chunks]  # displayed to the LLM / user — never modified
+    contexts: dict[str, str] = {}
+    if use_contextual:
+        progress("Generating contextual descriptions ...")
+        from .contextual import generate_contexts
+
+        contexts = generate_contexts(chunks, cfg, progress)
+        progress(f"  {sum(1 for v in contexts.values() if v)}/{len(chunks)} chunks have context")
+    # What is actually embedded and keyword-indexed: context (if any) + chunk text.
+    index_texts = [
+        (contexts[c.chunk_id] + "\n\n" + c.text if contexts.get(c.chunk_id) else c.text) for c in chunks
+    ]
+
     progress(f"Embedding {len(chunks)} chunks via '{cfg.models.embed_model}' ...")
-    texts = [c.text for c in chunks]
-    embeddings = embed_texts(texts, cfg.models.embed_model)
+    embeddings = embed_texts(index_texts, cfg.models.embed_model)
     progress("  done")
 
     progress("Writing Chroma collection ...")
@@ -142,7 +167,7 @@ def build_index(cfg: Config | None = None, progress=print) -> dict:
     progress(f"  {coll.count()} vectors in Chroma")
 
     progress("Building BM25 index ...")
-    tokenized = [_tokenize(t) for t in texts]
+    tokenized = [_tokenize(t) for t in index_texts]
     bm25 = BM25Okapi(tokenized)
     bm25_path = cfg.storage.index_state_file.parent / "bm25.pkl"
     bm25_path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +182,8 @@ def build_index(cfg: Config | None = None, progress=print) -> dict:
         "num_files": len({c.path for c in chunks}),
         "num_chunks": len(chunks),
         "num_symbols": len(symbols.all_names()),
+        "num_call_edges": sum(len(v) for v in graph.callees.values()),
+        "contextual": use_contextual,
         "skipped": skipped,
         "duration_s": round(time.time() - t0, 2),
     }

@@ -17,6 +17,10 @@ chroma/
 demo_output.json
 /.claude/
 
+# eval run artifacts (golden set + helpers are tracked; reports are not)
+eval/report*.json
+
+
 # Build & generated
 build/
 dist/

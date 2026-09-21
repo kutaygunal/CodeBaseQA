@@ -1,0 +1,144 @@
+# Answer-level golden cases for scripts/eval_answers.py
+#
+# Each case scores the *final answer* of the full agent, not just chunk recall.
+#   category      definition | usage | comparison | flow | follow-up | negative
+#   q             the question to ask
+#   history       optional prior turns (first user message is replayed to seed the thread)
+#   expect        files the answer should ground on / cite (empty for negatives)
+#   budget_ms     latency budget for this case (default below)
+#   golden        brief reference answer for future LLM-judge and for humans
+#
+# Negative cases (category: negative): the topic is NOT in the LuxTrace codebase;
+# the answer must refuse / say "not found" instead of hallucinating code.
+#
+# Expected paths were checked against the ../LuxTrace index (.index/state.json).
+
+defaults:
+  budget_ms: 90000
+
+cases:
+  # ---------------------------------------------------------------- definition
+  - id: def-envmap
+    category: definition
+    q: "How is an HDR environment map importance-sampled for image-based lighting?"
+    expect: [src/core/EnvironmentMap.cpp, src/core/EnvironmentMap.h]
+    golden: "EnvironmentMap importance-samples a Radiance HDR map, using a CDF built over the map and cosine/sun-band sampling."
+  - id: def-zip
+    category: definition
+    q: "How does the code write ZIP archives with CRC checksums?"
+    expect: [src/core/ZipWriter.cpp, src/core/ZipWriter.h]
+    golden: "ZipWriter writes ZIP entries with CRC32 checksums and local/central directory records."
+  - id: def-coating
+    category: definition
+    q: "How are thin-film anti-reflection coating reflectances computed at a surface?"
+    expect: [src/core/Coating.cpp, src/core/Coating.h]
+    golden: "Coating computes reflectance via characteristic-matrix thin-film stack math (V-coat, broadband AR)."
+  - id: def-threadpool
+    category: definition
+    q: "How does the thread pool distribute parallel work across worker threads?"
+    expect: [src/core/ThreadPool.cpp, src/core/ThreadPool.h]
+    golden: "ThreadPool owns worker threads and a work queue; tasks are scheduled to workers, joined/cancelled."
+  - id: def-polarisation
+    category: definition
+    q: "How is polarisation tracked through reflections using Stokes vectors and Mueller matrices?"
+    expect: [src/core/Polarisation.cpp, src/core/Polarisation.h]
+    golden: "Polarisation tracks the state via Stokes vector 4-tuples and rotates it with Mueller matrices per surface reflection."
+  - id: def-materialfile
+    category: definition
+    q: "How are optical glass materials loaded from AGF catalog files?"
+    expect: [src/core/MaterialFile.cpp, src/core/MaterialFile.h]
+    golden: "MaterialFile parses an AGF catalog into named materials with refractive-index dispersion and sells data."
+  - id: def-cache
+    category: definition
+    q: "How is the simulation result cache keyed so repeated runs reuse results?"
+    expect: [src/core/Simulation.cpp, src/core/Simulation.h]
+    golden: "Simulation builds a cache key (config, seed, scene identity) and reuses a previously stored result for an identical key."
+  - id: def-meta
+    category: definition
+    q: "How are metasurface diffraction orders and beam deflection modelled?"
+    expect: [src/core/Metasurface.cpp, src/core/Metasurface.h]
+    golden: "Metasurface models a linear phase gradient / ideal order and applies grating diffraction with per-order efficiency."
+
+  # ---------------------------------------------------------------- usage
+  - id: usage-tracers
+    category: usage
+    q: "What functions call TraceScene::Trace, and where is it implemented?"
+    expect: [src/core/TraceScene.cpp, src/core/TraceScene.h]
+    golden: "Lists callers of TraceScene::Trace (e.g. RayTracer/Worker) and notes the implementation file/scope."
+  - id: usage-result
+    category: usage
+    q: "Where is SimulationResult used and how is it produced?"
+    expect: [src/core/SimulationResult.h, src/core/Simulation.cpp, src/core/Simulation.h]
+    golden: "SimulationResult is produced at the end of a Simulation run and referenced across the codebase."
+  - id: usage-mesh
+    category: usage
+    q: "What calls MeshBuilder::meshShape, and how is adaptive meshing verified?"
+    expect: [src/core/MeshBuilder.cpp, src/core/MeshBuilder.h, test/AdaptiveMeshTests.inc]
+    golden: "meshShape is called when building scene meshes; adaptive-mesh tests check sagitta error and watertightness."
+
+  # ---------------------------------------------------------------- comparison
+  - id: cmp-gpu-cpu
+    category: comparison
+    q: "How does the GPU tracing path differ from the CPU trace?"
+    expect: [src/gpu/GpuTrace.cu, src/gpu/GpuTrace.h, src/core/TraceSceneSimd.cpp, test/GpuBackendTests.inc]
+    golden: "CPU uses TraceSceneSimd (SIMD); GPU uses GpuTrace.cu (OptiX/CUDA); tests validate CPU/GPU parity and which scenes the GPU refuses."
+  - id: cmp-fwd-bwd
+    category: comparison
+    q: "How do the forward path tracer and the backward camera tracer differ in how they produce an image?"
+    expect: [src/core/BackwardTracer.cpp, src/core/BackwardTracer.h, src/core/TraceScene.cpp]
+    golden: "Forward traces rays from light sources; backward traces from the camera and produces a luminance image; tests cross-check both."
+  - id: cmp-sphere-spot
+    category: comparison
+    q: "How are encircled energy and spot-size metrics computed differently from the traced rays?"
+    expect: [src/core/Analysis.cpp, src/core/Analysis.h]
+    golden: "Analysis computes encircled-energy fraction vs spot RMS size from the detector arrivals."
+
+  # ---------------------------------------------------------------- flow
+  - id: flow-sim
+    category: flow
+    q: "How does a simulation run go from the UI to the final result?"
+    expect: [src/ui/MainWindow.cpp, src/core/SimulationWorker.cpp, src/core/Simulation.cpp, src/core/RayTracer.cpp]
+    golden: "MainWindow -> SimulationWorker runs Simulation on a worker thread; Simulation drives RayTracer and returns SimulationResult."
+  - id: flow-inspector
+    category: flow
+    q: "How does the SurfaceInspector panel let the user edit a surface's optical properties?"
+    expect: [src/ui/SurfaceInspector.cpp, src/ui/SurfaceInspector.h]
+    golden: "SurfaceInspector binds widgets to SurfaceOptics fields and writes edits back via onEdit/optics accessor."
+
+  # ---------------------------------------------------------------- follow-up
+  - id: fu-cancel
+    category: follow-up
+    q: "And how does it handle cancellation?"
+    history:
+      - {role: user, content: "How does SimulationWorker run a simulation in the background?"}
+    expect: [src/core/SimulationWorker.cpp, src/core/SimulationWorker.h]
+    golden: "Follow-up resolves to SimulationWorker; describes cancellation of the background run."
+  - id: fu-rayfile
+    category: follow-up
+    q: "Which file defines the struct that stores that?"
+    history:
+      - {role: user, content: "What does a loaded ray file contain?"}
+    expect: [src/core/RayFile.cpp, src/core/RayFile.h]
+    golden: "Follow-up resolves to RayFileData in RayFile.h."
+
+  # ---------------------------------------------------------------- negative
+  - id: neg-login
+    category: negative
+    q: "How does the application handle user login and authentication?"
+    expect: []
+    golden: "Not in the codebase: LuxTrace has no auth/login."
+  - id: neg-http
+    category: negative
+    q: "Where is the REST API server started and how are HTTP requests routed?"
+    expect: []
+    golden: "Not in the codebase: this is a desktop Qt application, no HTTP server."
+  - id: neg-ml
+    category: negative
+    q: "Which framework is used to train the machine-learning models, and what is the dataset split?"
+    expect: []
+    golden: "Not in the codebase: no ML training present."
+  - id: neg-billing
+    category: negative
+    q: "What database schema stores the user's billing and subscription data?"
+    expect: []
+    golden: "Not in the codebase: no billing/database."
