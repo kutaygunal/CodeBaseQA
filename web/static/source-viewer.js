@@ -76,7 +76,9 @@ async function svLoadAndRenderSource(container, path, startLine, endLine) {
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || 'not found'); }
     const data = await r.json();
     svRenderSource(container, data, startLine, endLine);
+    return true;
   } catch (e) {
     container.innerHTML = `<div class="error">Could not load ${svEscapeHtml(path)}: ${svEscapeHtml(String(e.message || e))}</div>`;
+    return false;
   }
 }

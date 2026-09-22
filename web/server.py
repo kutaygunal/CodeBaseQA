@@ -26,6 +26,7 @@ from cqa.agent import Agent
 from cqa.config import load_config
 from cqa.gittools import list_refs
 from cqa.providers import provider_status, set_runtime_key
+from cqa.retriever import Retriever
 from cqa.tools import list_dir, read_full_file
 
 app = FastAPI(title="CodebaseQA")
@@ -123,6 +124,17 @@ def source(path: str = Query(...)):
     return result
 
 
+@app.get("/api/resolve")
+def resolve(path: str = Query(...)):
+    """Resolve a bare filename (the model sometimes cites just `file:line`) back to the full
+    indexed path, so the source panel opens the right file."""
+    key = path.split("/")[-1]
+    for m in Retriever(_cfg)._bm25_meta:
+        if (m.get("path") or "").split("/")[-1] == key:
+            return {"path": m["path"]}
+    raise HTTPException(status_code=404, detail=f"no indexed file named {path}")
+
+
 @app.get("/api/tree")
 def tree(path: str = Query("")):
     result = list_dir(_cfg, path)
@@ -163,6 +175,13 @@ def rename_thread(thread_id: str, req: RenameRequest):
 def delete_thread(thread_id: str):
     get_agent().delete_thread(thread_id)
     return {"ok": True}
+
+
+@app.delete("/api/threads")
+def clear_threads():
+    """Delete all conversations at once."""
+    n = get_agent().clear_all_threads()
+    return {"ok": True, "deleted": n}
 
 
 # --- SSE plumbing ---------------------------------------------------------

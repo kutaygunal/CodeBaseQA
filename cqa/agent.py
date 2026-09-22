@@ -84,6 +84,13 @@ class Agent:
         self.turns.delete_thread(thread_id)
         self.threads.delete(thread_id)
 
+    def clear_all_threads(self) -> int:
+        """Delete every conversation (threads + their turns). Returns how many were removed."""
+        ids = [t.get("id") for t in self.threads.list()]
+        for tid in ids:
+            self.delete_thread(tid)
+        return len(ids)
+
     # --- ask / stream ----------------------------------------------------
 
     def ask(

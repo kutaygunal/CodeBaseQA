@@ -159,7 +159,7 @@
     transition: margin-left 0.18s ease;
   }
   .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }
-  .sidebar-header { padding: 12px; }
+  .sidebar-header { padding: 12px; display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
   .new-chat-btn {
     width: 100%; font-size: 13px; padding: 9px 12px; border-radius: 9px;
     background: var(--accent); color: var(--btn-fg); border: none;
@@ -167,6 +167,13 @@
     display: flex; align-items: center; gap: 6px; justify-content: center;
   }
   .new-chat-btn:hover { filter: brightness(1.08); }
+  .clear-chats-btn {
+    width: 100%; font-size: 13px; padding: 9px 12px; border-radius: 9px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text-dim);
+    cursor: pointer; font-weight: 600;
+    display: flex; align-items: center; gap: 6px; justify-content: center;
+  }
+  .clear-chats-btn:hover { border-color: var(--danger); color: var(--danger); }
   .thread-list { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
   .thread-item {
     display: flex; align-items: center; gap: 6px;
@@ -258,6 +265,10 @@
     background: var(--citation-bg); color: var(--citation-fg); border: 1px solid transparent; cursor: pointer;
   }
   .citations-row .chip:hover { border-color: var(--citation-fg); }
+  .refs { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-top: 8px; padding: 6px 16px 4px; }
+  .refs-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-dim); font-weight: 600; width: 100%; }
+  .ref-link { color: var(--accent); font-size: 12px; cursor: pointer; border: 1px solid var(--border); padding: 4px 9px; border-radius: 8px; background: var(--bg-elev); text-decoration: none; }
+  .ref-link:hover { border-color: var(--accent); }
 
   .msg-footer { display: flex; align-items: center; gap: 10px; color: var(--text-faint); font-size: 11px; }
   .msg-footer button {
@@ -457,6 +468,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <button class="new-chat-btn" id="newChatBtn">+ New chat</button>
+      <button class="clear-chats-btn" id="clearChatsBtn" title="Remove all chats">Remove All</button>
       <div class="sidebar-actions">
         <button id="reviewBtn" title="Review a git range or pasted diff">🔍 Review changes</button>
       </div>
@@ -559,6 +571,7 @@ const els = {
   sendBtn: document.getElementById('sendBtn'),
   statusPill: document.getElementById('statusPill'),
   newChatBtn: document.getElementById('newChatBtn'),
+  clearChatsBtn: document.getElementById('clearChatsBtn'),
   sidebar: document.getElementById('sidebar'),
   sidebarToggle: document.getElementById('sidebarToggle'),
   threadList: document.getElementById('threadList'),
@@ -884,7 +897,8 @@ async function switchThread(id) {
         bubble.style.display = '';
         setAnswerHtml(bubble, renderAnswer(m.content), false);
         hydrateAnswer(bubble);
-        renderCitationChips(citationsRow, m.citations || []);
+        const _refs = numberCitations(bubble, m.citations || []);
+        renderReferences(assistantDiv, _refs);
         if (m.trace) {
           const traceBody = tracePanel.querySelector('.trace-body');
           renderTraceEntries(traceBody, m.trace, lastQuestion);
@@ -906,6 +920,11 @@ function resetToEmpty(clearThreadId = true) {
   els.thread.appendChild(els.emptyState);
 }
 els.newChatBtn.addEventListener('click', () => { threadId = null; resetToEmpty(); loadThreads(); closeSourcePanel(); });
+els.clearChatsBtn.addEventListener('click', async () => {
+  if (!confirm('Delete ALL conversations? This cannot be undone.')) return;
+  try { const r = await fetch('/api/threads', { method: 'DELETE' }); await r.json(); } catch (e) { console.error(e); }
+  threadId = null; resetToEmpty(); loadThreads(); closeSourcePanel();
+});
 els.sidebarToggle.addEventListener('click', () => els.sidebar.classList.toggle('collapsed'));
 
 // ======================= source panel =======================
@@ -916,7 +935,22 @@ async function openSource(path, startLine, endLine) {
   els.sourcePath.textContent = path;
   els.sourceLines.textContent = (startLine && endLine) ? `L${startLine}-${endLine}` : '';
   lastSource = { path, start: startLine, end: endLine };
-  await svLoadAndRenderSource(els.sourceBody, path, startLine, endLine);
+  let ok = await svLoadAndRenderSource(els.sourceBody, path, startLine, endLine);
+  if (!ok) {
+    // bare-filename fallback — resolve to the full indexed path.
+    try {
+      const r = await fetch('/api/resolve?path=' + encodeURIComponent(path));
+      if (r.ok) {
+        const d = await r.json();
+        if (d.path && d.path !== path) {
+          lastSource.path = d.path;
+          els.sourcePath.textContent = d.path;
+          ok = await svLoadAndRenderSource(els.sourceBody, d.path, startLine, endLine);
+        }
+      }
+    } catch (e) { console.error(e); }
+  }
+  return ok;
 }
 function closeSourcePanel() { els.sourcePanel.classList.remove('open'); }
 els.closeSourceBtn.addEventListener('click', closeSourcePanel);
@@ -964,8 +998,9 @@ function parseCitation(text) {
 }
 
 document.addEventListener('click', (e) => {
-  const el = e.target.closest('.citation, .chip, .hit-row');
+  const el = e.target.closest('.citation, .chip, .hit-row, .ref-link');
   if (!el) return;
+  if (el.tagName === 'A') e.preventDefault();
   if (el.dataset.path) {
     openSource(el.dataset.path, parseInt(el.dataset.start || '0', 10) || null, parseInt(el.dataset.end || '0', 10) || null);
     return;
@@ -1037,6 +1072,54 @@ function renderCitationChips(row, citations) {
     row.appendChild(span);
   }
 }
+// Number the inline citations [1],[2]... in reading order, REUSING one number per SOURCE
+// (file). The model sometimes cites a bare filename; we canonicalize to the full indexed
+// path (from the backend citation list) so numbering, links and clicks all use the real path.
+function numberCitations(root, fullCitations) {
+  const spans = root.querySelectorAll('.citation');
+  if (!spans.length) return [];
+  const full = fullCitations || [];
+  const canonical = (t) => {
+    const key = String(t).split(':')[0];
+    const base = key.split('/').pop();
+    for (const c of full) { if (String(c).split(':')[0] === key) return c; }
+    for (const c of full) { if (String(c).split(':')[0].split('/').pop() === base) return c; }
+    return t;
+  };
+  const numByPath = new Map();   // file path -> reference number
+  const refs = [];               // unique sources in first-appearance order
+  let n = 1;
+  spans.forEach((s) => {
+    const t = s.textContent.trim();
+    const canon = canonical(t);
+    const parsed = parseCitation(canon);
+    const path = parsed ? parsed.path : String(canon).split(':')[0];
+    if (!numByPath.has(path)) { numByPath.set(path, n); refs.push({ path, cite: canon }); n++; }
+    const num = numByPath.get(path);
+    s.textContent = '[' + num + ']';
+    s.classList.add('cite-n');
+    if (parsed) { s.dataset.path = parsed.path; s.dataset.start = parsed.start; s.dataset.end = parsed.end; }
+  });
+  return refs;
+}
+
+// Append a numbered References block — ONE entry per source, filename only.
+function renderReferences(assistantDiv, refs) {
+  if (!refs.length) return;
+  const d = document.createElement('div');
+  d.className = 'refs';
+  let h = '<span class="refs-title">References</span>';
+  refs.forEach((r, i) => {
+    const parsed = parseCitation(r.cite);
+    const base = String(r.path).split('/').pop();
+    const start = parsed ? (parsed.start || '') : '';
+    const end = parsed ? (parsed.end || '') : '';
+    h += `<a class="ref-link" data-path="${r.path}" data-start="${start}" data-end="${end}" href="#">[${i + 1}] ${escapeHtml(base)}</a>`;
+  });
+  d.innerHTML = h;
+  assistantDiv.appendChild(d);
+}
+
 // Append a persistent, labelled "Thinking…" block to the answer.
 function renderThinking(arena, text) {
   if (!text) return;
@@ -1420,7 +1503,8 @@ function handleEvent(p, ctx) {
     bubble.style.display = '';
     setAnswerHtml(bubble, renderAnswer(p.answer || '(no answer)'), false);
     hydrateAnswer(bubble);
-    renderCitationChips(citationsRow, p.citations || []);
+    const _refs = numberCitations(bubble, p.citations || []);
+    renderReferences(ctx.assistantDiv, _refs);
     if (p.cached) addStep(stepHtml('cache', p, ctx.question));
     renderTimeline(traceBody, p.trace || []);
     attachFooter(ctx.assistantDiv, { turn_id: p.turn_id, metrics: p.metrics, cached: p.cached, feedback: null });
